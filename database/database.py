@@ -10,6 +10,7 @@ from typing import Any
 
 import aiosqlite
 
+from database.migrations import run_migrations
 from database.schema import SCHEMA, SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
@@ -23,13 +24,17 @@ class Database:
 
     async def connect(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        had_data = self._path.exists() and self._path.stat().st_size > 0
         self._conn = await aiosqlite.connect(self._path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
-        await self._conn.executescript(SCHEMA)  # при первом запуске создаёт все таблицы
-        await self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        await self._conn.executescript(SCHEMA)  # базовая схема v1: при первом запуске создаёт таблицы
+        cursor = await self._conn.execute("PRAGMA user_version")
+        if (await cursor.fetchone())[0] == 0:  # свежая база (или база без версии из v1)
+            await self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         await self._conn.commit()
+        await run_migrations(self._conn, self._path, had_data)
         logger.info("SQLite готова: %s", self._path)
 
     async def close(self) -> None:

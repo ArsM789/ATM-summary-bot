@@ -108,3 +108,10 @@ def lessons_phrase(n: int) -> str:
 
 def capitalize_first(text: str) -> str:
     return text[:1].upper() + text[1:] if text else text
+
+
+def fmt_span(low: float, high: float) -> str:
+    """«+8…+11 °C» (или «+8 °C», если границы совпали после округления)."""
+    if round_half_up(low) == round_half_up(high):
+        return f"{fmt_temp(high, '')} °C"
+    return f"{fmt_temp(low, '')}…{fmt_temp(high, '')} °C"

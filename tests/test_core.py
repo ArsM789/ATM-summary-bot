@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from database.models import User, mask_to_weekdays, weekdays_to_mask  # noqa: E402
+from database.models import LessonItem, User, mask_to_weekdays, weekdays_to_mask  # noqa: E402
 from database.schema import SCHEMA  # noqa: E402
 from services.clothing_advisor import (  # noqa: E402
     CORE, EXTRAS, FEET, HANDS, HEAD, LEGS, NECK, OUTER, Thermal, advise, build_facts, thermal_level,
@@ -24,7 +24,15 @@ from services.weather_models import (  # noqa: E402
 from utils.formatting import fmt_range, fmt_temp, join_ru, lessons_phrase, plural  # noqa: E402
 
 TZ = ZoneInfo("Europe/Moscow")
-LESSONS = {0: 7, 1: 6, 2: 6, 3: 7, 4: 7, 5: 0, 6: 0}
+SCHEDULE = {
+    0: [LessonItem("Математика", 2), LessonItem("Русский язык", 1), LessonItem("Физика", 1),
+        LessonItem("История", 1), LessonItem("Английский", 2)],                      # 7 уроков
+    1: [LessonItem("Алгебра", 1), LessonItem("Геометрия", 1), LessonItem("Биология", 2),
+        LessonItem("Литература", 1), LessonItem("Информатика", 1)],                  # 6 уроков
+    2: [LessonItem("Химия", 1)],
+    3: [LessonItem("География", 2)],
+    4: [LessonItem("Физкультура", 1)],
+}
 
 
 def make_report(day: date, *, temp: float, feels: float | None = None, code: int = 3,
@@ -220,9 +228,9 @@ class AdvisorTests(unittest.TestCase):
 
 
 class GeneratorTests(unittest.TestCase):
-    def gen(self, now, report, user=None, seed=1):
+    def gen(self, now, report, user=None, seed=1, schedule=None, address=None):
         g = SummaryGenerator(rng=random.Random(seed))
-        return g.generate(SummaryContext(user or make_user(), LESSONS, now, report))
+        return g.generate(SummaryContext(user or make_user(), SCHEDULE if schedule is None else schedule, now, report, address=address))
 
     def test_monday_morning_cold(self):
         now = datetime(2026, 11, 9, 7, 30, tzinfo=TZ)  # понедельник
@@ -230,7 +238,10 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn("Арсений", text)
         self.assertIn("Понедельник, 9 ноября", text)
         self.assertIn("7 уроков", text)
-        self.assertIn("<blockquote>", text)
+        # предметы — в порядке ввода, с количеством
+        self.assertLess(text.index("1. Математика × 2"), text.index("2. Русский язык"))
+        self.assertLess(text.index("2. Русский язык"), text.index("3. Физика"))
+        self.assertIn("5. Английский × 2", text)
         self.assertIn("куртк", text)
         self.assertIn("шапку", text)
         self.assertNotIn("футболк", text)
@@ -240,19 +251,20 @@ class GeneratorTests(unittest.TestCase):
         text = self.gen(now, make_report(now.date(), temp=5))
         self.assertIn("уроков нет", text)
         self.assertNotIn("Продуктивного", text)
-        self.assertNotIn("урок", text.replace("уроков нет", ""))
+        self.assertNotIn("урок", text.replace("уроков нет", "").replace("«📅 Моё расписание»", ""))
 
     def test_evening_talks_about_tomorrow(self):
         now = datetime(2026, 11, 8, 20, 0, tzinfo=TZ)  # воскресенье вечер -> завтра понедельник
         text = self.gen(now, make_report(now.date(), temp=3))
-        self.assertIn("Завтра понедельник", text)
+        self.assertIn("Завтра", text)
         self.assertIn("7 уроков", text)
+        self.assertIn("1. Математика × 2", text)
         self.assertNotIn("доброе утро", text.lower())
 
     def test_friday_evening_tomorrow_is_weekend(self):
         now = datetime(2026, 11, 13, 19, 0, tzinfo=TZ)  # пятница вечер
         text = self.gen(now, make_report(now.date(), temp=3))
-        self.assertIn("Завтра суббота", text)
+        self.assertIn("Завтра", text)
         self.assertIn("уроков нет", text)
 
     def test_weather_unavailable_does_not_invent(self):
@@ -261,6 +273,27 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn("не удалось", text)
         self.assertNotIn("°", text)
         self.assertIn("7 уроков", text)
+
+    def test_unfilled_day_is_reported_not_invented(self):
+        now = datetime(2026, 11, 10, 7, 30, tzinfo=TZ)  # вторник
+        schedule = {k: v for k, v in SCHEDULE.items() if k != 1}
+        text = self.gen(now, make_report(now.date(), temp=5), schedule=schedule)
+        self.assertIn("не заполнено", text)
+        self.assertIn("вторник", text)
+        self.assertNotIn("Алгебра", text)
+        self.assertNotIn("уроков:", text)
+
+    def test_empty_schedule_whole_week(self):
+        now = datetime(2026, 11, 9, 7, 30, tzinfo=TZ)
+        text = self.gen(now, make_report(now.date(), temp=5), schedule={})
+        self.assertIn("не заполнено", text)
+
+    def test_address_variant_used_and_not_in_every_sentence(self):
+        now = datetime(2026, 11, 9, 7, 30, tzinfo=TZ)
+        for seed in range(40):
+            text = self.gen(now, make_report(now.date(), temp=5), seed=seed, address="Сеня")
+            self.assertLessEqual(text.count("Сеня"), 1, text)
+            self.assertNotIn("Арсений", text)  # используется выбранный вариант, а не основное имя
 
     def test_html_escaping(self):
         now = datetime(2026, 11, 9, 7, 30, tzinfo=TZ)
@@ -272,7 +305,7 @@ class GeneratorTests(unittest.TestCase):
         now = datetime(2026, 11, 9, 7, 30, tzinfo=TZ)
         report = make_report(now.date(), temp=5)
         g = SummaryGenerator(rng=random.Random(7))
-        ctx = SummaryContext(make_user(), LESSONS, now, report)
+        ctx = SummaryContext(make_user(), SCHEDULE, now, report)
         texts = [g.generate(ctx) for _ in range(12)]
         self.assertGreater(len(set(texts)), 6)
         greetings = [t.split("\n")[0] for t in texts]

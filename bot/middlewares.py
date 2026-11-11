@@ -26,5 +26,7 @@ class UserMiddleware(BaseMiddleware):
     ) -> Any:
         tg_user = data.get("event_from_user")
         if tg_user is not None and not tg_user.is_bot:
-            data["user"] = await self._users.get_or_create(tg_user.id, tg_user.first_name)
+            data["user"] = await self._users.get_or_create(
+                tg_user.id, tg_user.first_name, tg_user.username
+            )
         return await handler(event, data)

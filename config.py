@@ -12,10 +12,6 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# Расписание по умолчанию: индекс 0 — понедельник ... 6 — воскресенье.
-# Меняется через DEFAULT_LESSONS в .env; у каждого пользователя потом хранится своё.
-FALLBACK_LESSONS: tuple[int, ...] = (7, 6, 6, 7, 7, 0, 0)
-
 _TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
@@ -33,13 +29,19 @@ class Settings:
     default_longitude: float
     default_timezone: str
     default_send_time: str
-    default_lessons: dict[int, int]
+    admin_id: int | None
+    broadcast_rate: float
     database_path: Path
     weather_cache_ttl: int
     weather_timeout: float
     weather_retries: int
     log_level: str
     custom_emoji: dict[str, str]
+
+
+def is_admin(user_id: int | None, admin_id: int | None) -> bool:
+    """Единая серверная проверка прав администратора. Без ADMIN_ID администратора нет ни у кого."""
+    return admin_id is not None and user_id is not None and user_id == admin_id
 
 
 def _get_float(name: str, default: float, lo: float, hi: float) -> float:
@@ -68,19 +70,13 @@ def _get_int(name: str, default: int, lo: int, hi: int) -> int:
     return value
 
 
-def _parse_lessons(raw: str) -> dict[int, int]:
-    if not raw.strip():
-        values = list(FALLBACK_LESSONS)
-    else:
-        try:
-            values = [int(part) for part in raw.split(",")]
-        except ValueError as exc:
-            raise ConfigError(
-                f"DEFAULT_LESSONS должно быть списком из 7 чисел через запятую, получено: {raw!r}"
-            ) from exc
-    if len(values) != 7 or any(not 0 <= v <= 15 for v in values):
-        raise ConfigError("DEFAULT_LESSONS: нужно ровно 7 чисел от 0 до 15 (Пн..Вс)")
-    return dict(enumerate(values))
+def _parse_admin_id(raw: str) -> int | None:
+    raw = raw.strip()
+    if not raw:
+        return None
+    if not raw.lstrip("-").isdigit() or int(raw) <= 0:
+        raise ConfigError("ADMIN_ID должен быть положительным числом — ваш Telegram ID (узнать: @userinfobot)")
+    return int(raw)
 
 
 def _parse_custom_emoji(raw: str) -> dict[str, str]:
@@ -134,7 +130,8 @@ def load_settings() -> Settings:
         default_longitude=_get_float("DEFAULT_LONGITUDE", 49.1221, -180, 180),
         default_timezone=timezone,
         default_send_time=send_time,
-        default_lessons=_parse_lessons(os.getenv("DEFAULT_LESSONS", "")),
+        admin_id=_parse_admin_id(os.getenv("ADMIN_ID", "")),
+        broadcast_rate=_get_float("BROADCAST_RATE", 15, 1, 28),
         database_path=db_path,
         weather_cache_ttl=_get_int("WEATHER_CACHE_TTL", 600, 0, 3600),
         weather_timeout=_get_float("WEATHER_TIMEOUT", 10, 2, 60),
