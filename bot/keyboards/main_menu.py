@@ -6,15 +6,21 @@ from aiogram.types import InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMar
 from bot.keyboards.common import button
 
 BTN_SUMMARY = "🌤 Сводка"
+BTN_LESSONS = "📅 Моё расписание"
 BTN_SETTINGS = "⚙️ Настройки"
-BTN_SCHEDULE = "📅 Расписание"
+BTN_FEEDBACK = "💬 Сообщить об ошибке / предложить улучшение"
+# Старая кнопка из прошлой версии: у существующих пользователей она может оставаться на клавиатуре.
+BTN_LEGACY_SCHEDULE = "📅 Расписание"
+
+MENU_TEXTS = frozenset({BTN_SUMMARY, BTN_LESSONS, BTN_SETTINGS, BTN_FEEDBACK, BTN_LEGACY_SCHEDULE})
 
 
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_SUMMARY)],
-            [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_SCHEDULE)],
+            [KeyboardButton(text=BTN_LESSONS), KeyboardButton(text=BTN_SETTINGS)],
+            [KeyboardButton(text=BTN_FEEDBACK)],
         ],
         resize_keyboard=True,
         is_persistent=True,

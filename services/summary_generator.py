@@ -13,15 +13,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
-from database.models import User
+from database.models import LessonItem, User
 from services.clothing_advisor import (
     CORE, EXTRAS, FEET, HANDS, HEAD, LEGS, NECK, OUTER,
     ClothingAdvice, Thermal, WeatherFacts, advise, build_facts,
 )
-from services.time_service import DayPart, day_part, format_date, weekday_name
-from services.weather_models import DayForecast, WeatherReport, describe_code
+from services.time_service import DayPart, WEEKDAYS_ACC, day_part, format_date, weekday_name
+from services.weather_models import WeatherReport, describe_code
+from services.schedule_parser import format_day_numbered, total_lessons
 from utils.formatting import (
-    DIVIDER, EmojiPack, capitalize_first, esc, fmt_range, fmt_speed, fmt_temp,
+    EmojiPack, capitalize_first, esc, fmt_range, fmt_speed, fmt_temp,
     join_ru, lessons_phrase, round_half_up,
 )
 
@@ -52,9 +53,10 @@ _PRECIP_WORDS = {
 @dataclass(frozen=True)
 class SummaryContext:
     user: User
-    lessons: Mapping[int, int]   # 0 = понедельник ... 6 = воскресенье
-    now: datetime                # aware, в часовом поясе пользователя
-    report: WeatherReport | None  # None — погоду получить не удалось
+    schedule: Mapping[int, Sequence[LessonItem]]  # расписание ЭТОГО пользователя: 0 = понедельник ... 4 = пятница
+    now: datetime                                 # aware, в часовом поясе пользователя
+    report: WeatherReport | None                  # None — погоду получить не удалось
+    address: str | None = None                    # выбранный вариант обращения (None -> основное имя)
 
 
 @dataclass(frozen=True)
@@ -99,35 +101,30 @@ class SummaryGenerator:
     def generate(self, ctx: SummaryContext) -> str:
         focus = resolve_focus(ctx.now)
         uid = ctx.user.telegram_id
-        name = esc(ctx.user.name)
+        name = esc(ctx.address or ctx.user.name)
         today = ctx.now.date()
 
-        lessons_count = int(ctx.lessons.get(focus.focus_date.weekday(), 0))
-        is_free_day = lessons_count == 0
+        greeting = self._greeting(uid, focus.part, name)
+        name_used = name in greeting  # имя в сообщении появляется один раз, а не в каждой фразе
 
-        blocks: list[str] = []
-        blocks.append(f"<b>{self._greeting(uid, focus.part, name)}</b>")
-        blocks.append(
-            f"{self._emo('calendar')} <b>{capitalize_first(weekday_name(today))}, {format_date(today)}</b>"
-            f" · {esc(ctx.user.city)}"
-        )
+        blocks: list[str] = [
+            f"<b>{greeting}</b>",
+            f"{self._emo('calendar')} {capitalize_first(weekday_name(today))}, {format_date(today)} · {esc(ctx.user.city)}",
+        ]
 
-        advice: ClothingAdvice | None = None
         if ctx.report is not None:
-            facts = self._facts(ctx.report, focus)
-            advice = advise(facts)
-            blocks.append(self._weather_prose(uid, ctx, focus, advice))
-            blocks.append(self._data_block(ctx, focus, facts))
+            advice = advise(self._facts(ctx.report, focus))
+            blocks.append(self._weather_text(uid, ctx, focus, advice))
             blocks.append(f"{self._emo('jacket')} {self._clothing_text(uid, focus, advice)}")
         else:
             blocks.append(
-                f"{self._emo('cloud')} Погоду сейчас получить не удалось, а выдумывать её я не буду. "
-                f"Попробуй нажать «Сводка» ещё раз через пару минут."
+                f"{self._emo('cloud')} Погоду сейчас получить не удалось — выдумывать её не буду. "
+                f"Попробуй «Сводка» ещё раз чуть позже."
             )
 
-        blocks.append(DIVIDER)
-        blocks.append(f"{self._emo('books')} {self._lessons_text(uid, focus, lessons_count)}")
-        blocks.append(f"<i>{self._closing(uid, focus, lessons_count, is_free_day)}</i>")
+        lessons_block, mode, total = self._lessons_block(uid, focus, ctx.schedule)
+        blocks.append(lessons_block)
+        blocks.append(f"<i>{self._closing(uid, focus, mode, total, None if name_used else name)}</i>")
         return "\n\n".join(blocks)
 
     # ----------------------------- выбор вариантов -----------------------------
@@ -181,79 +178,56 @@ class SummaryGenerator:
     def _day_word(focus: Focus) -> str:
         return "Завтра" if focus.is_tomorrow else "Сегодня"
 
-    def _weather_prose(self, uid: int, ctx: SummaryContext, focus: Focus, advice: ClothingAdvice) -> str:
+    def _weather_text(self, uid: int, ctx: SummaryContext, focus: Focus, advice: ClothingAdvice) -> str:
+        """Короткий абзац: переход к погоде, описание неба, цифры (сейчас / диапазон дня / ветер), осадки."""
         facts = advice.facts
         report = ctx.report
         assert report is not None
+        cur = report.current
         day = self._day_word(focus)
         adjective = self._pick(uid, f"level:{advice.level.name}", _LEVEL_WORDS[advice.level])
-
         sky_condition = describe_code(facts.dominant_code)
         sky = sky_condition.text
-        city = esc(ctx.user.city)
 
-        templates = [
-            f"{day} {sky}, на улице {adjective}.",
-            f"{day} {sky} и {adjective}.",
-            f"{day} в городе {city}: {sky}, {adjective}.",
-            f"За окном {sky} — на улице {adjective}.",
-        ]
-        if advice.level <= Thermal.COLD:
-            templates.append(f"{day} {sky}, и {adjective} — одевайся с умом.")
-        sentence = self._pick(uid, "weather", templates)
-        parts = [f"{sky_condition.emoji} {sentence}"]
+        intro = self._pick(uid, "weather_intro", [
+            f"За окном {sky}, {adjective}.",
+            f"{capitalize_first(sky)}, {adjective}.",
+            f"Что с погодой: {sky}, {adjective}.",
+            f"На улице {adjective}, {sky}.",
+        ])
 
-        # Осадки: отдельная фраза, если небо уже не описано как этот тип осадков.
+        now_part = f"сейчас {fmt_temp(cur.temp, '°')}"
+        if abs(cur.apparent - cur.temp) >= 2:
+            now_part += f" (ощущается как {fmt_temp(cur.apparent)})"
+        forecast = report.day(focus.focus_date)
+        range_part = f"{day.lower()} {fmt_range(forecast.temp_min, forecast.temp_max)}" if forecast else ""
+        wind_part = ""
+        if facts.hours_count and facts.max_wind >= 6:
+            wind_part = f", ветер до {fmt_speed(facts.max_wind)}"
+            if facts.max_gust - facts.max_wind >= 4:
+                wind_part += f" (порывы до {fmt_speed(facts.max_gust)})"
+
+        pieces = [now_part] + ([range_part] if range_part else [])
+        numbers = self._pick(uid, "weather_numbers", [
+            f"{capitalize_first(', '.join(pieces))}{wind_part}.",
+            f"{capitalize_first(', '.join(reversed(pieces)))}{wind_part}.",
+        ])
+        parts = [f"{sky_condition.emoji} {intro}", numbers]
+
         precip = facts.precip_kind
+        prob = facts.max_precip_prob
         if precip and _PRECIP_OF_KIND.get(sky_condition.kind) != precip:
-            word, genitive = _PRECIP_WORDS[precip]
-            prob = facts.max_precip_prob
+            word, _ = _PRECIP_WORDS[precip]
             prob_part = f" (вероятность до {round_half_up(prob)}%)" if prob is not None else ""
-            strong = prob is not None and prob >= 60
             if precip == "thunder":
                 parts.append(f"Возможна {word}{prob_part}.")
-            elif strong:
+            elif prob is not None and prob >= 60:
                 parts.append(f"Ожидается {word}{prob_part}.")
             else:
-                parts.append(f"Возможен {word}{prob_part}." if precip != "snow" else f"Возможен снег{prob_part}.")
+                parts.append(f"Возможен {word}{prob_part}.")
+        elif not precip and prob is not None and prob >= 20:
+            parts.append(f"Вероятность осадков — до {round_half_up(prob)}%.")
         return " ".join(parts)
-
-    def _data_block(self, ctx: SummaryContext, focus: Focus, facts: WeatherFacts) -> str:
-        report = ctx.report
-        assert report is not None
-        cur = report.current
-        lines: list[str] = []
-
-        cur_emoji = describe_code(cur.code).emoji
-        now_line = f"{cur_emoji} Сейчас: <b>{fmt_temp(cur.temp, '°C')}</b>"
-        if abs(cur.apparent - cur.temp) >= 2:
-            now_line += f", ощущается как <b>{fmt_temp(cur.apparent)}</b>"
-        lines.append(now_line)
-
-        day_forecast: DayForecast | None = report.day(focus.focus_date)
-        label = self._day_word(focus)
-        if day_forecast is not None:
-            lines.append(
-                f"📈 {label}: <b>{fmt_range(day_forecast.temp_min, day_forecast.temp_max)}</b>"
-            )
-
-        if facts.hours_count:
-            wind_line = f"{self._emo('wind')} Ветер: <b>{fmt_speed(facts.max_wind)}</b>"
-            if facts.max_gust - facts.max_wind >= 3:
-                wind_line += f", порывы до <b>{fmt_speed(facts.max_gust)}</b>"
-            lines.append(wind_line)
-
-        prob = facts.max_precip_prob
-        if prob is None and day_forecast is not None:
-            prob = day_forecast.precip_prob_max
-        if prob is not None:
-            icon = "❄️" if facts.precip_kind == "snow" else "☔"
-            if prob < 5:
-                lines.append(f"{icon} Осадки: <b>не ожидаются</b>")
-            else:
-                lines.append(f"{icon} Осадки: до <b>{round_half_up(prob)}%</b>")
-
-        return "<blockquote>" + "\n".join(lines) + "</blockquote>"
 
     # ----------------------------- одежда -----------------------------
 
@@ -301,11 +275,11 @@ class SummaryGenerator:
             )
 
         if optional_items:
-            sentences.append(f"<i>По желанию можно добавить: {join_ru(optional_items)}.</i>")
+            sentences.append(f"<i>По желанию можно добавить: {join_ru(optional_items[:2])}.</i>")
         if extras_optional:
             sentences.append(f"<i>На всякий случай можно взять {join_ru(extras_optional)}.</i>")
 
-        for warning in advice.outfit.warnings[:3]:
+        for warning in advice.outfit.warnings[:2]:
             sentences.append(f"<i>⚠️ {capitalize_first(warning)}.</i>")
 
         text = " ".join(s for s in sentences if s)
@@ -313,54 +287,64 @@ class SummaryGenerator:
 
     # ----------------------------- уроки -----------------------------
 
-    def _lessons_text(self, uid: int, focus: Focus, count: int) -> str:
+    def _lessons_block(
+        self, uid: int, focus: Focus, schedule: Mapping[int, Sequence[LessonItem]]
+    ) -> tuple[str, str, int]:
+        """(текст блока, режим дня: school|weekend|empty, всего уроков)."""
         when = self._day_word(focus)
+        weekday_index = focus.focus_date.weekday()
         weekday = weekday_name(focus.focus_date)
-        wd_index = focus.focus_date.weekday()
 
-        if count == 0:
-            if wd_index >= 5:
-                head = self._pick(uid, "free", [
-                    f"{when} {weekday} — выходной, уроков нет {self._emo('party')}",
-                    f"{when} {weekday}, уроков нет — можно выдохнуть {self._emo('party')}",
-                ])
-                tail = self._pick(uid, "free_tail", ["Хорошего отдыха!", "Наслаждайся выходным!"])
-            else:
-                head = f"{when} {weekday}, по расписанию уроков нет."
-                tail = "Можно заняться своими делами."
-            return f"{head} {tail}"
+        if weekday_index >= 5:
+            text = self._pick(uid, "weekend", [
+                f"{self._emo('party')} {when} выходной — уроков нет.",
+                f"{self._emo('party')} {when} {weekday}, уроков нет.",
+            ])
+            return text, "weekend", 0
 
+        items = list(schedule.get(weekday_index, ()))
+        if not items:
+            return (
+                f"{self._emo('books')} Расписание на {WEEKDAYS_ACC[weekday_index]} пока не заполнено — "
+                f"его можно добавить в «📅 Моё расписание».",
+                "empty", 0,
+            )
+
+        total = total_lessons(items)
+        lp = lessons_phrase(total)
         head = self._pick(uid, "lessons", [
-            f"{when} {weekday}, у тебя <b>{lessons_phrase(count)}</b>.",
-            f"{when} {weekday} — по расписанию <b>{lessons_phrase(count)}</b>.",
-            f"{when} {weekday}: <b>{lessons_phrase(count)}</b>.",
+            f"{when} у тебя <b>{lp}</b>:",
+            f"{when} по расписанию <b>{lp}</b>:",
+            f"{when} {weekday} — <b>{lp}</b>:",
         ])
-        if count <= 4:
-            tail = self._pick(uid, "tail_light", ["День обещает быть лёгким.", "Не так уж и много!"])
-        elif count <= 6:
-            tail = self._pick(uid, "tail_mid", ["Надеюсь, день пройдёт быстро!", "Обычный учебный день."])
-        else:
-            tail = self._pick(uid, "tail_heavy", ["День насыщенный, но ты справишься!", "Денёк непростой — держись!"])
-        return f"{head} {tail}"
+        return f"{self._emo('books')} {head}\n{format_day_numbered(items)}", "school", total
 
     # ----------------------------- концовка -----------------------------
 
-    def _closing(self, uid: int, focus: Focus, count: int, is_free: bool) -> str:
+    def _closing(self, uid: int, focus: Focus, mode: str, total: int, name: str | None) -> str:
         part = focus.part
         if part is DayPart.MORNING:
-            options = (
-                ["Отличного выходного! 🌿", "Пусть день будет спокойным и приятным! 🌿"]
-                if is_free
-                else ["Продуктивного дня! 📚", "Удачи на уроках! ✨", "Хорошего настроения на весь день! 🙂", "Пусть день пройдёт легко! 💪"]
-            )
+            if mode == "weekend":
+                options = ["Хорошего выходного! 🌿", "Пусть день будет спокойным."]
+            elif mode == "school":
+                options = ["Продуктивного дня! 📚", "Удачи на уроках!", "Пусть день пройдёт легко."]
+                if total >= 7:
+                    options.append("День насыщенный — держись!")
+            else:
+                options = ["Хорошего дня!", "Спокойного и удачного дня."]
+            if name:
+                options.append(f"Хорошего дня, {name}!")
         elif part is DayPart.DAY:
-            options = ["Хорошего продолжения дня! ✨", "Лёгкой оставшейся части дня! 🙂"]
+            options = ["Хорошего продолжения дня!", "Лёгкой оставшейся части дня."]
+            if name:
+                options.append(f"Хорошего дня, {name}!")
         elif part is DayPart.EVENING:
-            options = (
-                ["Впереди выходной — наслаждайся! 🎉", "Хорошего вечера, а завтра — отдыхать! 🌿"]
-                if is_free
-                else ["Хорошего вечера! 🌙", "Отдыхай и набирайся сил на завтра! 🌙", "Спокойного вечера! ✨"]
-            )
+            if mode == "weekend":
+                options = ["Впереди выходной — отдыхай! 🌿", "Хорошего вечера и спокойных выходных."]
+            else:
+                options = ["Хорошего вечера!", "Отдыхай, набирайся сил на завтра.", "Спокойного вечера! ✨"]
+            if name:
+                options.append(f"Хорошего вечера, {name}!")
         else:
-            options = ["Спокойной ночи! 🌙", "Сладких снов! 😴"]
-        return self._pick(uid, f"close:{part.value}:{is_free}", options)
+            options = ["Спокойной ночи! 🌙", "Сладких снов."]
+        return self._pick(uid, f"close:{part.value}:{mode}", options)

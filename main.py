@@ -11,11 +11,21 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.types import BotCommand
 
-from bot.handlers import errors, schedule, settings as settings_handlers, start, summary
+from bot.handlers import (
+    admin, errors, fallback, feedback, inline_mode, lessons, onboarding, schedule,
+    settings as settings_handlers, start, summary,
+)
+from bot.keyboards.main_menu import summary_keyboard
 from bot.middlewares import UserMiddleware
 from config import BASE_DIR, ConfigError, load_settings
 from database.database import Database
-from database.repositories import LessonsRepository, ScheduleRepository, UserRepository
+from database.repositories import (
+    BroadcastRepository, FeedbackRepository, NotificationLogRepository, ScheduleRepository,
+    UserRepository, WeeklyScheduleRepository,
+)
+from services.broadcast import BroadcastService
+from services.delivery import SummaryDispatcher
+from services.scheduler import SummaryScheduler
 from services.summary_generator import SummaryGenerator
 from services.summary_service import SummaryService
 from services.weather import WeatherService
@@ -28,7 +38,9 @@ COMMANDS = [
     BotCommand(command="start", description="Запустить бота"),
     BotCommand(command="summary", description="Получить сводку сейчас"),
     BotCommand(command="settings", description="Настройки"),
-    BotCommand(command="schedule", description="Расписание автосводок"),
+    BotCommand(command="lessons", description="Моё расписание уроков"),
+    BotCommand(command="schedule", description="Время автосводок"),
+    BotCommand(command="feedback", description="Сообщить об ошибке / идея"),
     BotCommand(command="help", description="Помощь и меню"),
 ]
 
@@ -50,35 +62,58 @@ async def main() -> int:
     await weather.start()
 
     users = UserRepository(db, settings)
-    lessons = LessonsRepository(db, settings)
+    weekly = WeeklyScheduleRepository(db)
     schedules = ScheduleRepository(db)
+    notification_log = NotificationLogRepository(db)
+    feedback_repo = FeedbackRepository(db)
+    broadcast_repo = BroadcastRepository(db)
     generator = SummaryGenerator(EmojiPack(settings.custom_emoji))
-    summaries = SummaryService(lessons, weather, generator)
+    summaries = SummaryService(weekly, users, weather, generator)
+
+    interrupted = await broadcast_repo.mark_interrupted()  # рассылки, оборванные прошлым перезапуском
+    if interrupted:
+        logger.warning("Помечено прерванных рассылок: %d", interrupted)
+    if settings.admin_id is None:
+        logger.warning("ADMIN_ID не задан: админ-панель и пересылка обращений отключены")
 
     bot = Bot(
         token=settings.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True),
     )
-    dp = Dispatcher()
+    broadcast = BroadcastService(bot, users, broadcast_repo, settings.broadcast_rate)
+    dispatcher = SummaryDispatcher(
+        bot, users, schedules, notification_log, summaries, reply_markup=summary_keyboard()
+    )
+    scheduler = SummaryScheduler(dispatcher)
+
+    dp = Dispatcher()  # FSM: MemoryStorage, ключ (бот, чат, пользователь) — состояния изолированы
     dp.workflow_data.update(
-        settings=settings, users=users, lessons=lessons, schedules=schedules,
-        summaries=summaries, guard=InFlightGuard(),
+        settings=settings, users=users, weekly=weekly, schedules=schedules, feedback=feedback_repo,
+        weather=weather, summaries=summaries, broadcast=broadcast, guard=InFlightGuard(),
     )
     middleware = UserMiddleware(users)
     dp.message.outer_middleware(middleware)
     dp.callback_query.outer_middleware(middleware)
 
+    # Порядок важен: сначала знакомство и меню, диалоги — внутри своих роутеров, заглушки — в самом конце.
     dp.include_router(errors.router)
+    dp.include_router(onboarding.router)
     dp.include_router(start.router)
     dp.include_router(summary.router)
+    dp.include_router(lessons.router)
     dp.include_router(settings_handlers.router)
     dp.include_router(schedule.router)
+    dp.include_router(feedback.router)
+    dp.include_router(admin.router)
+    dp.include_router(inline_mode.router)
+    dp.include_router(fallback.router)
 
     exit_code = 0
     try:
         me = await bot.get_me()
         logger.info("Бот запущен: @%s", me.username)
         await bot.set_my_commands(COMMANDS)
+        scheduler.start()
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     except TelegramUnauthorizedError:
         logger.error("Telegram отклонил BOT_TOKEN. Проверьте токен в .env (получить новый: @BotFather → /token).")
@@ -88,6 +123,7 @@ async def main() -> int:
         exit_code = 1
     finally:
         logger.info("Останавливаюсь: закрываю соединения…")
+        scheduler.shutdown()
         await weather.close()
         await db.close()
         await bot.session.close()

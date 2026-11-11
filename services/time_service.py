@@ -8,6 +8,7 @@ from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+WEEKDAYS_ACC = ("понедельник", "вторник", "среду", "четверг", "пятницу", "субботу", "воскресенье")  # «на …»
 WEEKDAYS_SHORT = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 MONTHS_GEN = (
     "января", "февраля", "марта", "апреля", "мая", "июня",

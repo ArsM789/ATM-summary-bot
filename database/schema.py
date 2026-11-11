@@ -1,5 +1,6 @@
 """Схема SQLite. SQLite — единственный источник истины для настроек и расписаний."""
 
+# Базовая схема (версия 1). Все последующие изменения — в database/migrations.py.
 SCHEMA_VERSION = 1
 
 SCHEMA = """
@@ -28,7 +29,7 @@ CREATE TABLE IF NOT EXISTS schedules (
     send_time     TEXT    NOT NULL,                              -- «ЧЧ:ММ» по времени пользователя
     enabled       INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     weekdays_mask INTEGER NOT NULL DEFAULT 127 CHECK (weekdays_mask BETWEEN 1 AND 127),
-    last_sent_on  TEXT,                                          -- защита от дублей отправки
+    last_sent_on  TEXT,                                          -- УСТАРЕЛО (v1): дедупликация теперь в notification_log
     UNIQUE (user_id, send_time)
 );
 

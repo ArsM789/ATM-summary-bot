@@ -7,6 +7,7 @@ from aiogram import Bot, F, Router
 from aiogram.enums import ChatAction, ChatType
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot.keyboards.main_menu import BTN_SUMMARY, summary_keyboard
@@ -24,7 +25,10 @@ ACTION = "summary"
 
 @router.message(F.text == BTN_SUMMARY)
 @router.message(Command("summary"))
-async def on_summary(message: Message, user: User, summaries: SummaryService, guard: InFlightGuard, bot: Bot) -> None:
+async def on_summary(
+    message: Message, user: User, summaries: SummaryService, guard: InFlightGuard, bot: Bot, state: FSMContext
+) -> None:
+    await state.clear()  # нажатие кнопки меню завершает любой незаконченный диалог
     if not guard.try_acquire(user.telegram_id, ACTION):
         return  # сводка уже готовится — повторный тап игнорируем
     try:
