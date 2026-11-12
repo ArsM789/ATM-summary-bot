@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from random import random
+import random
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta

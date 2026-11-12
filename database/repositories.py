@@ -201,6 +201,14 @@ class UserRepository:
         )
         return [(r["telegram_id"], bool(r["bot_blocked"])) for r in rows]
 
+    async def list_notification_targets(self) -> list[User]:
+        """Пользователи с включёнными уведомлениями, не заблокировавшие бота."""
+        rows = await self._db.fetchall(
+            "SELECT * FROM users "
+            "WHERE notifications_enabled = 1 AND bot_blocked = 0"
+        )
+        return [_user(row) for row in rows]
+
 
 # ============================================================ расписание уроков
 
