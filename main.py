@@ -25,6 +25,10 @@ from database.repositories import (
 )
 from services.broadcast import BroadcastService
 from services.delivery import SummaryDispatcher
+from services.tomorrow_brief_generator import TomorrowBriefGenerator
+from services.tomorrow_brief_service import TommorowBriefService
+from services.tomorrow_brief_dispatcher import TomorrowBriefDispatcher
+
 from services.events import EventLog
 from services.scheduler import SummaryScheduler
 from services.summary_generator import SummaryGenerator
@@ -77,6 +81,14 @@ async def main() -> int:
     broadcast_repo = BroadcastRepository(db)
     generator = SummaryGenerator(EmojiPack(settings.custom_emoji))
     summaries = SummaryService(weekly, users, weather, generator, events=events)
+    tomorrow_generator = TomorrowBriefGenerator(
+        EmojiPack(settings.custom_emoji),
+    )
+
+    tomorrow_briefs = TommorowBriefService(
+        weekly, users, weather, tomorrow_generator,
+    )
+
 
     interrupted = await broadcast_repo.mark_interrupted()  # рассылки, оборванные прошлым перезапуском
     if interrupted:
@@ -91,9 +103,26 @@ async def main() -> int:
     )
     broadcast = BroadcastService(bot, users, broadcast_repo, settings.broadcast_rate, events=events)
     dispatcher = SummaryDispatcher(
-        bot, users, schedules, notification_log, summaries, reply_markup=summary_keyboard(), events=events
+        bot,
+        users,
+        schedules,
+        notification_log,
+        summaries,
+        reply_markup=summary_keyboard(),
+        events=events,
     )
-    scheduler = SummaryScheduler(dispatcher, events=events)
+    tomorrow_dispatcher = TomorrowBriefDispatcher(
+        bot,
+        users,
+        notification_log,
+        tomorrow_briefs,
+    )
+
+    scheduler = SummaryScheduler(
+        dispatcher,
+        tomorrow_dispatcher=tomorrow_dispatcher,
+        events=events,
+    )
 
     dp = Dispatcher()  # FSM: MemoryStorage, ключ (бот, чат, пользователь) — состояния изолированы
     dp.workflow_data.update(

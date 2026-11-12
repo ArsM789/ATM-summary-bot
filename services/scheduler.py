@@ -19,8 +19,18 @@ logger = logging.getLogger(__name__)
 
 
 class SummaryScheduler:
-    def __init__(self, dispatcher: SummaryDispatcher, interval_seconds: int = 30, events: EventLog | None = None) -> None:
-        self._dispatcher = dispatcher
+    def __init__(
+            self,
+            dispatcher: SummaryDispatcher,
+            tomorrow_dispatcher=None,
+            interval_seconds: int = 30,
+            events: EventLog | None = None,
+    ) -> None:
+        self._dispatchers = [dispatcher]
+
+        if tomorrow_dispatcher is not None:
+            self._dispatchers.append(tomorrow_dispatcher)
+
         self._events = events or NullEventLog()
         self._interval = interval_seconds
         self._scheduler: AsyncIOScheduler | None = None
@@ -41,12 +51,25 @@ class SummaryScheduler:
         logger.info("Планировщик сводок запущен (проход каждые %d с)", self._interval)
 
     async def _tick(self) -> None:
-        try:
-            await self._dispatcher.run_once()
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Сбой прохода планировщика")
-            await self._events.log("error", f"Сбой прохода планировщика: {type(exc).__name__}: {str(exc)[:150]}",
-                                   level="error", throttle_key="scheduler-tick", throttle_seconds=300)
+        for dispatcher in self._dispatchers:
+            try:
+                await dispatcher.run_once()
+            except Exception as exc:
+                logger.exception(
+                    "Сбой диспетчера %s",
+                    type(dispatcher).__name__,
+                )
+
+                await self._events.log(
+                    "error",
+                    (
+                        f"Сбой диспетчера {type(dispatcher).__name__}: "
+                        f"{type(exc).__name__}: {str(exc)[:150]}"
+                    ),
+                    level="error",
+                    throttle_key=f"dispatcher-{type(dispatcher).__name__}",
+                    throttle_seconds=300,
+                )
 
     def shutdown(self) -> None:
         if self._scheduler and self._scheduler.running:
