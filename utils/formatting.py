@@ -15,7 +15,7 @@ UNICODE_EMOJI: dict[str, str] = {
     "moon": "🌙",
     "calendar": "🗓",
     "thermo": "🌡",
-    "jacket": "🧥",
+    "jacket": "👕",
     "books": "📚",
     "cloud": "☁️",
     "wind": "💨",

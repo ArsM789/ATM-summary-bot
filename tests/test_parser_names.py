@@ -6,10 +6,11 @@ import unittest
 
 import _shims  # noqa: F401  (путь проекта и шимы)
 
-from database.models import LessonItem, User
+from database.models import LessonItem, User, compress_lessons, expand_lessons
 from services.names import InvalidNameError, choose_name, parse_single_name, parse_variants, pick_address
 from services.schedule_parser import (
-    day_total_error, format_day_editable, format_day_numbered, parse_lessons, total_lessons,
+    day_total_error, format_day_editable, format_day_numbered, format_day_quote, parse_lessons, parse_numbers,
+    parse_week, remove_lessons, total_lessons,
 )
 
 
@@ -46,12 +47,10 @@ class LessonParserTests(unittest.TestCase):
         cases = {
             "Математика — 0": "больше нуля",
             "Математика — -2": "положительным",
-            "Математика — два": "число уроков",
+            "Математика — дваа": "число уроков",
             "Математика — 2.5": "число уроков",
             "Математика — 13": "максимум",
-            "Математика": "нет тире",
             "— 2": "пустое название",
-            "Математика —": "число уроков",
             "М" * 41 + " — 1": "длиннее",
         }
         for line, reason in cases.items():
@@ -82,9 +81,135 @@ class LessonParserTests(unittest.TestCase):
 
     def test_formatting(self):
         items = [LessonItem("Математика", 2), LessonItem("Физика", 1), LessonItem("<b>", 1)]
-        self.assertEqual(format_day_numbered(items), "1. Математика × 2\n2. Физика\n3. &lt;b&gt;")
+        # каждый урок — своя строка (Математика занимает уроки 1 и 2)
+        self.assertEqual(format_day_numbered(items), "1. Математика\n2. Математика\n3. Физика\n4. &lt;b&gt;")
+        self.assertEqual(format_day_quote(items), "<blockquote>" + format_day_numbered(items) + "</blockquote>")
         # «редактируемый» вид парсится обратно в то же самое
         self.assertEqual(parse_lessons(format_day_editable(items)).items, [LessonItem("Математика", 2), LessonItem("Физика", 1), LessonItem("<b>", 1)])
+
+
+class NewCountSemanticsTests(unittest.TestCase):
+    """Предмет без числа — один урок; «- 2» — два отдельных урока."""
+
+    def items(self, text):
+        r = parse_lessons(text)
+        self.assertEqual(r.errors, [], text)
+        return [(i.subject, i.count) for i in r.items]
+
+    def test_no_count_means_one(self):
+        self.assertEqual(self.items("Геометрия"), [("Геометрия", 1)])
+        self.assertEqual(self.items("геометрия\nФизика\nИстория"), [("Геометрия", 1), ("Физика", 1), ("История", 1)])
+
+    def test_two_lessons_render_as_two_numbered_lines(self):
+        # ровно сценарий пользователя: 4 урока до, потом «Геометрия - 2» -> уроки 5 и 6
+        text = "Алгебра\nФизика\nИстория\nЛитература\nгеометрия - 2"
+        r = parse_lessons(text)
+        self.assertEqual(total_lessons(r.items), 6)
+        self.assertEqual(format_day_numbered(r.items).splitlines()[-2:], ["5. Геометрия", "6. Геометрия"])
+        self.assertNotIn("×", format_day_numbered(r.items))
+
+    def test_flexible_count_forms(self):
+        for form in ("Геометрия - 2", "Геометрия — 2", "Геометрия: 2", "Геометрия x2", "Геометрия х 2", "Геометрия ×2",
+                     "Геометрия * 2", "Геометрия 2", "Геометрия - два", "Геометрия — 2 урока", "Геометрия -2"):
+            self.assertEqual(self.items(form), [("Геометрия", 2)], form)
+
+    def test_hyphen_inside_name_is_not_a_count(self):
+        self.assertEqual(self.items("Физ-ра"), [("Физ-ра", 1)])
+        self.assertEqual(self.items("Физ-ра - 2"), [("Физ-ра", 2)])
+        self.assertEqual(self.items("Что-то там"), [("Что-то там", 1)])
+        self.assertEqual(self.items("Информатика 10 класс"), [("Информатика 10 класс", 1)])
+
+    def test_dangling_dash_is_ignored(self):
+        self.assertEqual(self.items("Математика —"), [("Математика", 1)])
+        self.assertEqual(self.items("Математика -"), [("Математика", 1)])
+
+    def test_comma_separated(self):
+        self.assertEqual(self.items("Физика, История - 2; Химия"), [("Физика", 1), ("История", 2), ("Химия", 1)])
+        self.assertEqual(self.items("Математика - 2\nФизика, Химия"), [("Математика", 2), ("Физика", 1), ("Химия", 1)])
+
+    def test_typos_are_reported_not_swallowed(self):
+        for line in ("Математика - дваа", "Математика - ?", "Математика - 0", "Математика - -2", "123", "- 2"):
+            r = parse_lessons(line)
+            self.assertTrue(r.errors and not r.items, line)
+
+    def test_day_heading_in_single_day_mode_is_rejected_with_hint(self):
+        r = parse_lessons("Понедельник\nМатематика")
+        self.assertEqual([i.subject for i in r.items], ["Математика"])
+        self.assertIn("название дня", r.errors[0].reason)
+
+    def test_editable_text_roundtrip(self):
+        items = [LessonItem("Математика", 2), LessonItem("Физика", 1)]
+        self.assertEqual(format_day_editable(items), "Математика — 2\nФизика")  # единичные без числа
+        self.assertEqual(parse_lessons(format_day_editable(items)).items, items)
+
+    def test_expand_and_compress(self):
+        items = [LessonItem("Геометрия", 2), LessonItem("Физика", 1), LessonItem("Геометрия", 1)]
+        lessons = expand_lessons(items)
+        self.assertEqual(lessons, ["Геометрия", "Геометрия", "Физика", "Геометрия"])
+        self.assertEqual(compress_lessons(lessons), items)
+        self.assertEqual(compress_lessons(["А", "а", "Б"]), [LessonItem("А", 2), LessonItem("Б", 1)])
+
+
+class WeekParserTests(unittest.TestCase):
+    def test_full_week_paste(self):
+        text = ("Понедельник\nМатематика - 2\nФизика\n\n"
+                "Вторник: Алгебра, Геометрия, Биология - 2\n"
+                "**Среда**\nХимия\n"
+                "чт\nГеография - 2\n"
+                "Пятница:\nФизкультура\n"
+                "Суббота\nневажно\n")
+        w = parse_week(text)
+        self.assertEqual(w.errors, [])
+        self.assertTrue(w.ok and w.weekend_skipped)
+        self.assertEqual(sorted(w.days), [0, 1, 2, 3, 4])
+        self.assertEqual([(i.subject, i.count) for i in w.days[0].items], [("Математика", 2), ("Физика", 1)])
+        self.assertEqual([(i.subject, i.count) for i in w.days[1].items], [("Алгебра", 1), ("Геометрия", 1), ("Биология", 2)])
+        self.assertEqual(w.days[3].items, [LessonItem("География", 2)])
+
+    def test_partial_week_and_empty_day(self):
+        w = parse_week("Вторник\nАлгебра\nСреда\n")
+        self.assertEqual(sorted(w.days), [1])
+        self.assertEqual(w.empty_days, [2])        # день без предметов не трогаем
+        self.assertTrue(w.ok)
+
+    def test_errors_are_located(self):
+        w = parse_week("Математика\nПонедельник\nФизика - дваа\nВторник\nАлгебра\nПонедельник")
+        self.assertTrue(any("вне дня" in e.reason for e in w.errors))
+        self.assertTrue(any("дважды" in e.reason for e in w.errors))
+        self.assertTrue(any(e.line_no == 3 for e in w.days[0].errors))
+        self.assertFalse(w.ok)
+
+    def test_day_total_limit(self):
+        w = parse_week("Понедельник\nМатематика - 12\nФизика")
+        self.assertTrue(any("максимум" in e.reason for e in w.days[0].errors))
+
+
+class RemoveLessonsTests(unittest.TestCase):
+    ITEMS = [LessonItem("Математика", 2), LessonItem("Физика", 1), LessonItem("История", 2)]   # 5 уроков
+
+    def test_parse_numbers(self):
+        self.assertEqual(parse_numbers("3", 5), ([3], None))
+        self.assertEqual(parse_numbers("2, 4", 5), ([2, 4], None))
+        self.assertEqual(parse_numbers("2 4;5", 5), ([2, 4, 5], None))
+        self.assertEqual(parse_numbers("2-4", 5), ([2, 3, 4], None))
+        self.assertEqual(parse_numbers("4-2", 5), ([2, 3, 4], None))
+        for bad, part in (("", "номера"), ("abc", "не номер"), ("6", "нет"), ("0", "нет")):
+            numbers, error = parse_numbers(bad, 5)
+            self.assertEqual(numbers, [], bad)
+            self.assertIn(part, error)
+
+    def test_remove_splits_repeated_subject_and_keeps_order(self):
+        # убрать 2-й урок: «Математика ×2» превращается в одну Математику
+        self.assertEqual(remove_lessons(self.ITEMS, [2]),
+                         [LessonItem("Математика", 1), LessonItem("Физика", 1), LessonItem("История", 2)])
+        # убрать 3 (Физика): математики не склеиваются с историей
+        self.assertEqual(remove_lessons(self.ITEMS, [3]),
+                         [LessonItem("Математика", 2), LessonItem("История", 2)])
+        self.assertEqual(remove_lessons(self.ITEMS, [1, 2, 3, 4, 5]), [])
+        # после удаления «разделителя» одинаковые уроки сливаются в одну запись — отображение то же
+        merged = remove_lessons([LessonItem("А", 1), LessonItem("Б", 1), LessonItem("А", 1)], [2])
+        self.assertEqual(merged, [LessonItem("А", 2)])
+        self.assertEqual(expand_lessons(merged), ["А", "А"])
 
 
 class NameTests(unittest.TestCase):

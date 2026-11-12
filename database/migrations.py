@@ -16,7 +16,7 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-LATEST_VERSION = 2
+LATEST_VERSION = 3
 
 
 async def _columns(conn: aiosqlite.Connection, table: str) -> set[str]:
@@ -151,7 +151,25 @@ async def _migrate_to_2(conn: aiosqlite.Connection) -> None:
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_blocked ON users(bot_blocked)")
 
 
-_MIGRATIONS = {2: _migrate_to_2}
+async def _migrate_to_3(conn: aiosqlite.Connection) -> None:
+    # Журнал важных событий для администратора (без текстов сообщений пользователей).
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS event_log (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts       INTEGER NOT NULL,                      -- unix-время события
+            level    TEXT    NOT NULL CHECK (level IN ('info','warning','error')),
+            category TEXT    NOT NULL,                      -- user_new | user_blocked | error | delay | weather | delivery | broadcast | feedback | system
+            message  TEXT    NOT NULL,
+            user_id  INTEGER                                -- без внешнего ключа: события переживают удаление пользователя
+        )
+        """
+    )
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_event_log_ts ON event_log(ts)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_event_log_category_ts ON event_log(category, ts)")
+
+
+_MIGRATIONS = {2: _migrate_to_2, 3: _migrate_to_3}
 
 
 def _backup_sync(path: Path, version: int) -> Path:

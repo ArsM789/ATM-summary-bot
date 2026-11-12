@@ -20,11 +20,12 @@ from bot.middlewares import UserMiddleware
 from config import BASE_DIR, ConfigError, load_settings
 from database.database import Database
 from database.repositories import (
-    BroadcastRepository, FeedbackRepository, NotificationLogRepository, ScheduleRepository,
-    UserRepository, WeeklyScheduleRepository,
+    BroadcastRepository, EventLogRepository, FeedbackRepository, NotificationLogRepository,
+    ScheduleRepository, UserRepository, WeeklyScheduleRepository,
 )
 from services.broadcast import BroadcastService
 from services.delivery import SummaryDispatcher
+from services.events import EventLog
 from services.scheduler import SummaryScheduler
 from services.summary_generator import SummaryGenerator
 from services.summary_service import SummaryService
@@ -61,18 +62,26 @@ async def main() -> int:
     )
     await weather.start()
 
-    users = UserRepository(db, settings)
+    event_repo = EventLogRepository(db)
+    events = EventLog(event_repo)
+
+    async def on_user_created(new_user) -> None:
+        handle = f", @{new_user.username}" if new_user.username else ""
+        await events.log("user_new", f"Новый пользователь: {new_user.name}{handle}", user_id=new_user.telegram_id)
+
+    users = UserRepository(db, settings, on_created=on_user_created)
     weekly = WeeklyScheduleRepository(db)
     schedules = ScheduleRepository(db)
     notification_log = NotificationLogRepository(db)
     feedback_repo = FeedbackRepository(db)
     broadcast_repo = BroadcastRepository(db)
     generator = SummaryGenerator(EmojiPack(settings.custom_emoji))
-    summaries = SummaryService(weekly, users, weather, generator)
+    summaries = SummaryService(weekly, users, weather, generator, events=events)
 
     interrupted = await broadcast_repo.mark_interrupted()  # рассылки, оборванные прошлым перезапуском
     if interrupted:
         logger.warning("Помечено прерванных рассылок: %d", interrupted)
+        await events.log("broadcast", f"После перезапуска помечено прерванных рассылок: {interrupted}", level="warning")
     if settings.admin_id is None:
         logger.warning("ADMIN_ID не задан: админ-панель и пересылка обращений отключены")
 
@@ -80,16 +89,17 @@ async def main() -> int:
         token=settings.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True),
     )
-    broadcast = BroadcastService(bot, users, broadcast_repo, settings.broadcast_rate)
+    broadcast = BroadcastService(bot, users, broadcast_repo, settings.broadcast_rate, events=events)
     dispatcher = SummaryDispatcher(
-        bot, users, schedules, notification_log, summaries, reply_markup=summary_keyboard()
+        bot, users, schedules, notification_log, summaries, reply_markup=summary_keyboard(), events=events
     )
-    scheduler = SummaryScheduler(dispatcher)
+    scheduler = SummaryScheduler(dispatcher, events=events)
 
     dp = Dispatcher()  # FSM: MemoryStorage, ключ (бот, чат, пользователь) — состояния изолированы
     dp.workflow_data.update(
         settings=settings, users=users, weekly=weekly, schedules=schedules, feedback=feedback_repo,
         weather=weather, summaries=summaries, broadcast=broadcast, guard=InFlightGuard(),
+        events=events, event_repo=event_repo,
     )
     middleware = UserMiddleware(users)
     dp.message.outer_middleware(middleware)
@@ -112,6 +122,7 @@ async def main() -> int:
     try:
         me = await bot.get_me()
         logger.info("Бот запущен: @%s", me.username)
+        await events.log("system", f"Бот запущен (@{me.username})")
         await bot.set_my_commands(COMMANDS)
         scheduler.start()
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
@@ -123,6 +134,7 @@ async def main() -> int:
         exit_code = 1
     finally:
         logger.info("Останавливаюсь: закрываю соединения…")
+        await events.log("system", "Бот остановлен", throttle_key="stop", throttle_seconds=0)
         scheduler.shutdown()
         await weather.close()
         await db.close()

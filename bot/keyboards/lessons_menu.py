@@ -10,14 +10,15 @@ from services.time_service import WEEKDAYS_SHORT
 def overview_keyboard() -> InlineKeyboardMarkup:
     return markup(
         [button(WEEKDAYS_SHORT[d], f"ls:day:{d}") for d in range(5)],
-        [button("📝 Заполнить по дням", "ls:fill")],
+        [button("📝 Заполнить по дням", "ls:fill"), button("📋 Вставить неделю", "ls:week")],
     )
 
 
 def day_keyboard(weekday: int, filled: bool) -> InlineKeyboardMarkup:
     rows = [[button("➕ Добавить", f"ls:add:{weekday}"), button("🔁 Заменить день", f"ls:rep:{weekday}")]]
     if filled:
-        rows.append([button("🗑 Очистить день", f"ls:clr:{weekday}", style="danger")])
+        rows.append([button("➖ Убрать урок", f"ls:del:{weekday}"),
+                     button("🗑 Очистить день", f"ls:clr:{weekday}", style="danger")])
     rows.append([button("‹ Назад", "ls:home")])
     return markup(*rows)
 

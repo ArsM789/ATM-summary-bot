@@ -1,6 +1,7 @@
 """Модели погодных данных, коды WMO и разбор ответа Open-Meteo. Без сетевых зависимостей."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, NamedTuple
@@ -264,3 +265,108 @@ def parse_report(payload: dict[str, Any], city: str, tz_name: str) -> WeatherRep
         hours=tuple(hours),
         fetched_at=datetime.now(timezone.utc),
     )
+
+
+# ----------------------------- геокодинг (поиск города) -----------------------------
+
+@dataclass(frozen=True, slots=True)
+class GeoPlace:
+    name: str
+    latitude: float
+    longitude: float
+    country: str | None
+    region: str | None
+    timezone: str | None
+    country_code: str | None = None
+
+    @property
+    def label(self) -> str:
+        """«Казань, Татарстан, Россия» — чтобы одноимённые города различались в списке выбора."""
+        parts = [self.name]
+        if self.region and self.region.casefold() != self.name.casefold():
+            parts.append(self.region)
+        if self.country:
+            parts.append(self.country)
+        return ", ".join(parts)
+
+
+# Сокращения и разговорные названия, которых нет в геокодере.
+CITY_ALIASES = {
+    "спб": "Санкт-Петербург", "питер": "Санкт-Петербург", "санкт петербург": "Санкт-Петербург",
+    "мск": "Москва", "екб": "Екатеринбург", "ека": "Екатеринбург", "нск": "Новосибирск",
+    "нижний": "Нижний Новгород", "н новгород": "Нижний Новгород", "нн": "Нижний Новгород",
+    "ростов": "Ростов-на-Дону", "владик": "Владивосток", "челны": "Набережные Челны",
+    "самара": "Самара", "ёбург": "Екатеринбург",
+}
+_PLACE_PREFIX_RE = re.compile(r"^(?:г\.?|город|гор\.?|пгт\.?|пос\.?|поселок|посёлок|с\.|село|д\.|деревня)\s+", re.IGNORECASE)
+
+
+def search_queries(text: str) -> tuple[list[str], str | None]:
+    """Превращает ввод пользователя в список запросов к геокодеру (пробуются по очереди) и «уточнение».
+
+    «г. Казань» -> «Казань»;  «Казань, Россия» -> сначала «Казань, Россия» (API понимает страну/регион
+    после запятой), затем просто «Казань» с последующей фильтрацией; «СПб» -> «Санкт-Петербург»;
+    «Ростов на Дону» -> ещё и «Ростов-на-Дону». Пустой список — ввод непригоден."""
+    cleaned = " ".join((text or "").replace("\u00a0", " ").split()).strip(" .;")
+    cleaned = _PLACE_PREFIX_RE.sub("", cleaned)
+    parts = [p.strip() for p in cleaned.split(",") if p.strip()]
+    if not parts:
+        return [], None
+    name, qualifier = parts[0], (parts[1] if len(parts) > 1 else None)
+
+    alias_key = re.sub(r"[.\-]", " ", name).casefold()
+    alias_key = " ".join(alias_key.split())
+    name = CITY_ALIASES.get(alias_key, name)
+    if len(name) < 2:
+        return [], None
+
+    queries = [f"{name}, {qualifier}" if qualifier else name]
+    if qualifier:
+        queries.append(name)
+    if " " in name and "-" not in name:
+        queries.append(name.replace(" ", "-"))
+    unique: list[str] = []
+    for q in queries:
+        if q not in unique:
+            unique.append(q)
+    return unique, qualifier
+
+
+def parse_geocoding(payload: dict, qualifier: str | None = None, limit: int = 5) -> list[GeoPlace]:
+    """Разбор ответа /v1/search: пропускает битые записи, убирает дубли, при наличии уточнения
+    («Россия», «Татарстан», «RU») оставляет подходящие. Порядок — как у геокодера (по релевантности)."""
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list):
+        return []
+    places: list[GeoPlace] = []
+    seen: set[tuple] = set()
+    for item in results:
+        try:
+            name = str(item["name"]).strip()
+            lat, lon = float(item["latitude"]), float(item["longitude"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not name or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            continue
+        key_names = (name.casefold(), str(item.get("admin1") or "").casefold(), str(item.get("country_code") or "").casefold())
+        key_coords = (round(lat, 1), round(lon, 1), name.casefold())
+        if key_names in seen or key_coords in seen:
+            continue
+        seen.add(key_names)
+        seen.add(key_coords)
+        tz = item.get("timezone")
+        places.append(GeoPlace(
+            name=name, latitude=lat, longitude=lon,
+            country=item.get("country") or None, region=item.get("admin1") or None,
+            timezone=tz if isinstance(tz, str) and tz else None,
+            country_code=item.get("country_code") or None,
+        ))
+    if qualifier:
+        q = qualifier.casefold()
+        matching = [
+            p for p in places
+            if any(q in (value or "").casefold() for value in (p.country, p.region, p.country_code))
+        ]
+        if matching:
+            places = matching
+    return places[:limit]

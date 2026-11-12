@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import aiosqlite
@@ -11,7 +12,7 @@ import aiosqlite
 from config import Settings
 from database.database import Database
 from database.models import (
-    ALL_WEEKDAYS_MASK, Broadcast, FeedbackRecord, LessonItem, ScheduleEntry, User,
+    ALL_WEEKDAYS_MASK, Broadcast, EventRecord, FeedbackRecord, LessonItem, ScheduleEntry, User,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,9 +78,11 @@ def _schedule(row: aiosqlite.Row, prefix: str = "") -> ScheduleEntry:
 # ============================================================ users
 
 class UserRepository:
-    def __init__(self, db: Database, settings: Settings) -> None:
+    def __init__(self, db: Database, settings: Settings,
+                 on_created: "Callable[[User], Awaitable[None]] | None" = None) -> None:
         self._db = db
         self._settings = settings
+        self._on_created = on_created  # вызывается один раз для нового пользователя (журнал событий)
 
     async def get(self, user_id: int) -> User | None:
         row = await self._db.fetchone("SELECT * FROM users WHERE telegram_id = ?", (user_id,))
@@ -106,6 +109,7 @@ class UserRepository:
             return existing
 
         s = self._settings
+        is_new = False
         async with self._db.transaction() as conn:
             cursor = await conn.execute(
                 "INSERT OR IGNORE INTO users (telegram_id, name, city, latitude, longitude, timezone, "
@@ -114,6 +118,7 @@ class UserRepository:
                  s.default_longitude, s.default_timezone, username or None, tg_first_name or None),
             )
             if cursor.rowcount == 1:  # новый пользователь (а не гонка двух запросов)
+                is_new = True
                 await conn.execute(
                     "INSERT OR IGNORE INTO schedules (user_id, send_time, enabled, weekdays_mask, effective_from) "
                     "VALUES (?, ?, 1, ?, ?)",
@@ -122,6 +127,11 @@ class UserRepository:
                 logger.info("Новый пользователь: %s", user_id)
         created = await self.get(user_id)
         assert created is not None
+        if is_new and self._on_created is not None:
+            try:
+                await self._on_created(created)
+            except Exception:  # noqa: BLE001 — журнал не должен ломать регистрацию
+                logger.exception("Сбой обработчика создания пользователя")
         return created
 
     async def set_names(self, user_id: int, main_name: str, variants: list[str]) -> None:
@@ -532,3 +542,64 @@ class BroadcastRepository:
     async def mark_interrupted(self) -> int:
         """При старте процесса: рассылки, оборванные перезапуском, больше не «идут»."""
         return await self._db.execute("UPDATE broadcasts SET status = 'interrupted' WHERE status = 'running'")
+
+
+# ============================================================ журнал событий (для админа)
+
+class EventLogRepository:
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def add(self, level: str, category: str, message: str, user_id: int | None = None,
+                  ts: int | None = None) -> int:
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(
+                "INSERT INTO event_log (ts, level, category, message, user_id) VALUES (?, ?, ?, ?, ?)",
+                (int(time.time()) if ts is None else ts, level, category, message[:500], user_id),
+            )
+            return cursor.lastrowid
+
+    @staticmethod
+    def _where(categories: tuple[str, ...] | None, levels: tuple[str, ...] | None) -> tuple[str, list]:
+        clauses, params = [], []
+        if categories:
+            clauses.append(f"category IN ({','.join('?' * len(categories))})")
+            params.extend(categories)
+        if levels:
+            clauses.append(f"level IN ({','.join('?' * len(levels))})")
+            params.extend(levels)
+        return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+    async def list(self, categories: tuple[str, ...] | None = None, levels: tuple[str, ...] | None = None,
+                   limit: int = 10, offset: int = 0) -> list[EventRecord]:
+        where, params = self._where(categories, levels)
+        rows = await self._db.fetchall(
+            f"SELECT * FROM event_log{where} ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?", (*params, limit, offset)
+        )
+        return [EventRecord(r["id"], r["ts"], r["level"], r["category"], r["message"], r["user_id"]) for r in rows]
+
+    async def count(self, categories: tuple[str, ...] | None = None, levels: tuple[str, ...] | None = None) -> int:
+        where, params = self._where(categories, levels)
+        row = await self._db.fetchone(f"SELECT COUNT(*) AS n FROM event_log{where}", params)
+        return row["n"]
+
+    async def counts_since(self, since_ts: int) -> dict[str, int]:
+        """Сводка за период для шапки админ-панели: новые пользователи, ошибки, задержки."""
+        row = await self._db.fetchone(
+            "SELECT "
+            "COALESCE(SUM(category = 'user_new'), 0) AS new_users, "
+            "COALESCE(SUM(level = 'error'), 0) AS errors, "
+            "COALESCE(SUM(category IN ('delay', 'weather')), 0) AS delays "
+            "FROM event_log WHERE ts >= ?",
+            (since_ts,),
+        )
+        return {"new_users": row["new_users"], "errors": row["errors"], "delays": row["delays"]}
+
+    async def prune(self, keep_last: int = 2000, older_than_ts: int | None = None) -> int:
+        """Оставляет не больше keep_last последних записей (и/или удаляет старше older_than_ts)."""
+        removed = await self._db.execute(
+            "DELETE FROM event_log WHERE id <= (SELECT COALESCE(MAX(id), 0) FROM event_log) - ?", (keep_last,)
+        )
+        if older_than_ts is not None:
+            removed += await self._db.execute("DELETE FROM event_log WHERE ts < ?", (older_than_ts,))
+        return removed

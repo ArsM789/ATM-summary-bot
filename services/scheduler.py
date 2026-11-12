@@ -13,13 +13,15 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from services.delivery import SummaryDispatcher
+from services.events import EventLog, NullEventLog
 
 logger = logging.getLogger(__name__)
 
 
 class SummaryScheduler:
-    def __init__(self, dispatcher: SummaryDispatcher, interval_seconds: int = 30) -> None:
+    def __init__(self, dispatcher: SummaryDispatcher, interval_seconds: int = 30, events: EventLog | None = None) -> None:
         self._dispatcher = dispatcher
+        self._events = events or NullEventLog()
         self._interval = interval_seconds
         self._scheduler: AsyncIOScheduler | None = None
 
@@ -41,8 +43,10 @@ class SummaryScheduler:
     async def _tick(self) -> None:
         try:
             await self._dispatcher.run_once()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             logger.exception("Сбой прохода планировщика")
+            await self._events.log("error", f"Сбой прохода планировщика: {type(exc).__name__}: {str(exc)[:150]}",
+                                   level="error", throttle_key="scheduler-tick", throttle_seconds=300)
 
     def shutdown(self) -> None:
         if self._scheduler and self._scheduler.running:

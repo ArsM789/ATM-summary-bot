@@ -58,6 +58,25 @@ class LessonItem:
     count: int
 
 
+def expand_lessons(items: "list[LessonItem] | tuple[LessonItem, ...]") -> list[str]:
+    """[Геометрия×2, Физика×1] -> ['Геометрия', 'Геометрия', 'Физика']: по одному элементу на каждый урок дня."""
+    lessons: list[str] = []
+    for item in items:
+        lessons.extend([item.subject] * item.count)
+    return lessons
+
+
+def compress_lessons(lessons: "list[str]") -> "list[LessonItem]":
+    """Обратное к expand_lessons: подряд идущие одинаковые уроки собираются в одну запись для хранения."""
+    result: list[LessonItem] = []
+    for subject in lessons:
+        if result and result[-1].subject.casefold() == subject.casefold():
+            result[-1] = LessonItem(result[-1].subject, result[-1].count + 1)
+        else:
+            result.append(LessonItem(subject, 1))
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class FeedbackRecord:
     id: int
@@ -79,3 +98,13 @@ class Broadcast:
     success_count: int
     failed_count: int
     blocked_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class EventRecord:
+    id: int
+    ts: int
+    level: str       # info | warning | error
+    category: str
+    message: str
+    user_id: int | None = None

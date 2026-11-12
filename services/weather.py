@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
@@ -14,10 +13,13 @@ from services.weather_models import (
     DAILY_PARAMS,
     HOURLY_PARAMS,
     CityNotFoundError,
+    GeoPlace,
     WeatherParseError,
     WeatherReport,
     WeatherUnavailableError,
+    parse_geocoding,
     parse_report,
+    search_queries,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,25 +28,6 @@ FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
-
-
-@dataclass(frozen=True, slots=True)
-class GeoPlace:
-    name: str
-    latitude: float
-    longitude: float
-    country: str | None
-    region: str | None
-    timezone: str | None
-
-    @property
-    def label(self) -> str:
-        parts = [self.name]
-        if self.region and self.region != self.name:
-            parts.append(self.region)
-        if self.country:
-            parts.append(self.country)
-        return ", ".join(parts)
 
 
 class WeatherService:
@@ -113,32 +96,20 @@ class WeatherService:
 
     # ------------------------------ геокодинг ------------------------------
 
-    async def search_city(self, name: str, count: int = 5) -> list[GeoPlace]:
-        name = name.strip()
-        if len(name) < 2:
-            raise CityNotFoundError(name)
-        payload = await self._get_json(
-            GEOCODING_URL, {"name": name, "count": str(count), "language": "ru", "format": "json"}
-        )
-        results = payload.get("results") or []
-        places: list[GeoPlace] = []
-        for item in results:
-            try:
-                places.append(
-                    GeoPlace(
-                        name=str(item["name"]),
-                        latitude=float(item["latitude"]),
-                        longitude=float(item["longitude"]),
-                        country=item.get("country"),
-                        region=item.get("admin1"),
-                        timezone=item.get("timezone"),
-                    )
-                )
-            except (KeyError, TypeError, ValueError):
-                continue
-        if not places:
-            raise CityNotFoundError(name)
-        return places
+    async def search_city(self, text: str, count: int = 5) -> list[GeoPlace]:
+        """Ищет город по вводу пользователя. Пробует несколько вариантов запроса (см. search_queries):
+        «Казань, Россия» -> «Казань»; «Ростов на Дону» -> «Ростов-на-Дону»; «СПб» -> «Санкт-Петербург»."""
+        queries, qualifier = search_queries(text)
+        if not queries:
+            raise CityNotFoundError(text)
+        for query in queries:
+            payload = await self._get_json(
+                GEOCODING_URL, {"name": query, "count": "10", "language": "ru", "format": "json"}
+            )
+            places = parse_geocoding(payload, qualifier, limit=count)
+            if places:
+                return places
+        raise CityNotFoundError(text)
 
     # ------------------------------ HTTP ------------------------------
 

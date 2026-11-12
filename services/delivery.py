@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ from enum import Enum
 from typing import Any
 
 from database.repositories import NotificationLogRepository, ScheduleRepository, UserRepository
+from services.events import EventLog, NullEventLog
 from services.scheduling_logic import CATCHUP_WINDOW_SECONDS, Due, find_due
 from services.summary_service import SummaryService
 from services.telegram_send import SendStatus, send_message_safe
@@ -21,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 NOTIFICATION_TYPE = "summary"
 MAX_ATTEMPTS = 3
+LATE_SECONDS = 300       # сводка ушла позже чем на 5 минут — в журнал
+SLOW_RUN_SECONDS = 30    # проход планировщика дольше 30 с — в журнал
 
 
 class Outcome(str, Enum):
@@ -37,6 +41,7 @@ class SummaryDispatcher:
         log: NotificationLogRepository, summaries: SummaryService,
         *, concurrency: int = 5, reply_markup: Any = None,
         send: Callable[..., Awaitable[Any]] = send_message_safe,
+        events: EventLog | None = None,
     ) -> None:
         self._bot = bot
         self._users = users
@@ -46,6 +51,7 @@ class SummaryDispatcher:
         self._semaphore = asyncio.Semaphore(concurrency)
         self._reply_markup = reply_markup
         self._send = send
+        self._events = events or NullEventLog()
 
     async def run_once(self, now_utc: datetime | None = None) -> Counter:
         """Один проход планировщика: найти, кому пора, и отправить (ограниченно параллельно)."""
@@ -64,10 +70,38 @@ class SummaryDispatcher:
                     logger.exception("Сбой доставки сводки пользователю %s", item.user.telegram_id)
                     return Outcome.FAILED
 
-        for outcome in await asyncio.gather(*(guarded(d) for d in due)):
+        started = time.monotonic()
+        outcomes = await asyncio.gather(*(guarded(d) for d in due))
+        for outcome in outcomes:
             results[outcome] += 1
         logger.info("Планировщик: к отправке %d, итог %s", len(due), dict(results))
+        await self._report(due, outcomes, now, time.monotonic() - started)
         return results
+
+    async def _report(self, due: list[Due], outcomes: list[Outcome], now: datetime, elapsed: float) -> None:
+        """Важное — в журнал админа: опоздания, блокировки, сбои, долгий проход."""
+        late = [
+            now.timestamp() - d.scheduled_ts for d, o in zip(due, outcomes)
+            if o is Outcome.SENT and now.timestamp() - d.scheduled_ts > LATE_SECONDS
+        ]
+        if late:
+            await self._events.log(
+                "delay", f"Сводок отправлено с опозданием: {len(late)} (максимум {int(max(late) // 60)} мин)",
+                level="warning", throttle_key="late-summaries", throttle_seconds=600,
+            )
+        if elapsed > SLOW_RUN_SECONDS:
+            await self._events.log(
+                "delay", f"Проход планировщика занял {elapsed:.0f} с (сводок: {len(due)})",
+                level="warning", throttle_key="slow-run", throttle_seconds=600,
+            )
+        for d, outcome in zip(due, outcomes):
+            uid = d.user.telegram_id
+            if outcome is Outcome.BLOCKED:
+                await self._events.log("user_blocked", "Пользователь заблокировал бота (сводка не доставлена)",
+                                       user_id=uid, throttle_key=f"blocked-{uid}", throttle_seconds=86400)
+            elif outcome is Outcome.FAILED:
+                await self._events.log("delivery", f"Не удалось отправить сводку ({d.slot})", level="error",
+                                       user_id=uid, throttle_key=f"fail-{uid}-{d.slot}", throttle_seconds=900)
 
     async def deliver(self, due: Due, now_utc: datetime) -> Outcome:
         user_id = due.user.telegram_id

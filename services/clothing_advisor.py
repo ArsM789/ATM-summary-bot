@@ -33,9 +33,9 @@ class Thermal(IntEnum):
 
 
 _BOUNDS = (
-    (-15.0, Thermal.EXTREME),
-    (-8.0, Thermal.HARD_FROST),
-    (-2.0, Thermal.FROST),
+    (-25.0, Thermal.EXTREME),
+    (-12.0, Thermal.HARD_FROST),
+    (-5.0, Thermal.FROST),
     (4.0, Thermal.COLD),
     (10.0, Thermal.COOL),
     (16.0, Thermal.FRESH),

@@ -7,20 +7,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from aiogram import F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from bot.filters import TEXT_INPUT, IsAdmin
 from bot.helpers import clip, edit_or_reply
-from bot.keyboards.admin_menu import admin_keyboard, back_keyboard, broadcast_confirm_keyboard, cancel_keyboard
+from bot.keyboards.admin_menu import (
+    admin_keyboard, back_keyboard, broadcast_confirm_keyboard, cancel_keyboard, logs_keyboard,
+)
 from bot.states.settings_states import AdminBroadcast
 from config import Settings, is_admin
-from database.repositories import FeedbackRepository, UserRepository
+from database.repositories import EventLogRepository, FeedbackRepository, UserRepository
 from services.broadcast import BroadcastService
+from services.events_format import FILTERS, PAGE_SIZE, format_events_page
+from services.time_service import get_zone
 from utils.formatting import esc
 
 logger = logging.getLogger(__name__)
@@ -40,17 +45,61 @@ def _bc_id(data: str | None) -> int | None:
         return None
 
 
+async def _admin_text(event_repo: EventLogRepository) -> str:
+    counts = await event_repo.counts_since(int(time.time()) - 86400)
+    return (
+        "🛠 <b>Админ-панель</b>\n\n"
+        f"За 24 часа: 🆕 новых — <b>{counts['new_users']}</b> · 🔴 ошибок — <b>{counts['errors']}</b> · "
+        f"⏱ задержек — <b>{counts['delays']}</b>"
+    )
+
+
 @router.message(Command("admin"))
-async def cmd_admin(message: Message, state: FSMContext) -> None:
+async def cmd_admin(message: Message, state: FSMContext, event_repo: EventLogRepository) -> None:
     await state.clear()
-    await message.answer("🛠 <b>Админ-панель</b>", reply_markup=admin_keyboard())
+    await message.answer(await _admin_text(event_repo), reply_markup=admin_keyboard())
 
 
 @router.callback_query(F.data.in_({"adm:home", "adm:cancel"}))
-async def admin_home(callback: CallbackQuery, state: FSMContext) -> None:
+async def admin_home(callback: CallbackQuery, state: FSMContext, event_repo: EventLogRepository) -> None:
     await state.clear()
     await callback.answer()
-    await edit_or_reply(callback, "🛠 <b>Админ-панель</b>", reply_markup=admin_keyboard())
+    await edit_or_reply(callback, await _admin_text(event_repo), reply_markup=admin_keyboard())
+
+
+# ----------------------------------------------------------------- журнал событий
+
+async def _logs_view(code: str, page: int, event_repo: EventLogRepository, users: UserRepository,
+                     settings: Settings) -> tuple[str, "InlineKeyboardMarkup"]:
+    categories, levels, title = FILTERS.get(code, FILTERS["all"])
+    code = code if code in FILTERS else "all"
+    total = await event_repo.count(categories, levels)
+    pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    records = await event_repo.list(categories, levels, PAGE_SIZE, page * PAGE_SIZE)
+    admin = await users.get(settings.admin_id) if settings.admin_id else None
+    try:
+        tz = get_zone(admin.timezone if admin else settings.default_timezone)
+    except ValueError:
+        tz = get_zone("UTC")
+    return clip(format_events_page(records, tz, title, total, page)), logs_keyboard(code, page, pages)
+
+
+@router.message(Command("logs"))
+async def cmd_logs(message: Message, state: FSMContext, event_repo: EventLogRepository,
+                   users: UserRepository, settings: Settings) -> None:
+    await state.clear()
+    text, keyboard = await _logs_view("all", 0, event_repo, users, settings)
+    await message.answer(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.regexp(r"^adm:lg:[a-z]{3}:\d{1,4}$"))
+async def show_logs(callback: CallbackQuery, event_repo: EventLogRepository, users: UserRepository,
+                    settings: Settings) -> None:
+    _, _, code, page = (callback.data or "").split(":")
+    text, keyboard = await _logs_view(code, int(page), event_repo, users, settings)
+    await callback.answer()
+    await edit_or_reply(callback, text, reply_markup=keyboard)
 
 
 # ----------------------------------------------------------------- рассылка

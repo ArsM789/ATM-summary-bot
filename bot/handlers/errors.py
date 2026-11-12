@@ -1,4 +1,4 @@
-"""Глобальный обработчик ошибок: логируем и вежливо сообщаем пользователю."""
+"""Глобальный обработчик ошибок: логируем, пишем в журнал админа и вежливо сообщаем пользователю."""
 from __future__ import annotations
 
 import logging
@@ -6,15 +6,32 @@ import logging
 from aiogram import Router
 from aiogram.types import ErrorEvent
 
+from services.events import EventLog
+
 logger = logging.getLogger(__name__)
 
 router = Router(name="errors")
 
 
 @router.errors()
-async def on_error(event: ErrorEvent) -> bool:
-    logger.error("Необработанная ошибка в обработчике", exc_info=event.exception)
+async def on_error(event: ErrorEvent, events: EventLog) -> bool:
+    exc = event.exception
+    logger.error("Необработанная ошибка в обработчике", exc_info=exc)
     update = event.update
+
+    kind, user_id = "update", None
+    if update.message:
+        kind, user_id = "message", update.message.from_user.id if update.message.from_user else None
+    elif update.callback_query:
+        kind, user_id = "callback", update.callback_query.from_user.id
+    elif update.inline_query:
+        kind, user_id = "inline", update.inline_query.from_user.id
+    summary = f"{type(exc).__name__}: {str(exc)[:160]}"
+    await events.log(
+        "error", f"Необработанная ошибка ({kind}): {summary}", level="error", user_id=user_id,
+        throttle_key=f"handler-error-{summary[:80]}", throttle_seconds=60,
+    )
+
     try:
         if update.message:
             await update.message.answer("😔 Что-то пошло не так. Попробуй ещё раз чуть позже.")

@@ -202,11 +202,11 @@ class MultiUserDeliveryTests(DeliveryCase):
         v, ny = sent[1], sent[3]
         # Владивосток: вторник, СВОИ уроки вторника, СВОЁ имя, СВОЙ город
         self.assertIn("Владивосток", v); self.assertIn("Вторник, 10 ноября", v)
-        self.assertIn("Алгебра_V", v); self.assertIn("Биология_V × 2", v)
+        self.assertIn("1. Алгебра_V", v); self.assertIn("2. Биология_V\n3. Биология_V", v)  # два урока биологии — 2 и 3
         self.assertNotIn("Понедельничный_V", v)
         # Нью-Йорк: 16:00 понедельника — «день» (вечер начинается с 17:00): СВОИ уроки понедельника
         self.assertIn("Нью-Йорк", ny); self.assertIn("Понедельник, 9 ноября", ny)
-        self.assertIn("История_NY × 3", ny)
+        self.assertIn("1. История_NY\n2. История_NY\n3. История_NY", ny)
         self.assertNotIn("Вторничный_NY", ny)
         # ничего чужого
         for other in ("Химия_M", "Анна", "Москва", "Алгебра_V", "Арсений"):

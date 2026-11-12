@@ -20,7 +20,7 @@ from services.clothing_advisor import (
 )
 from services.time_service import DayPart, WEEKDAYS_ACC, day_part, format_date, weekday_name
 from services.weather_models import WeatherReport, describe_code
-from services.schedule_parser import format_day_numbered, total_lessons
+from services.schedule_parser import format_day_quote, total_lessons
 from utils.formatting import (
     EmojiPack, capitalize_first, esc, fmt_range, fmt_speed, fmt_temp,
     join_ru, lessons_phrase, round_half_up,
@@ -153,11 +153,11 @@ class SummaryGenerator:
             DayPart.DAY: [
                 f"{name}, добрый день!",
                 f"Привет, {name}! Как проходит день?",
-                f"{name}, привет! Небольшая сводка на остаток дня 🌤",
+                f"{name}, привет! Небольшая сводка на остаток дня",
             ],
             DayPart.EVENING: [
                 f"{name}, добрый вечер!",
-                f"Привет, {name}! Подведём итоги дня?) {e('moon')}",
+                f"Привет, {name}! {e('moon')}",
                 f"Вечер добрый, {name}! {e('moon')}",
             ],
             DayPart.NIGHT: [
@@ -317,7 +317,7 @@ class SummaryGenerator:
             f"{when} по расписанию <b>{lp}</b>:",
             f"{when} {weekday} — <b>{lp}</b>:",
         ])
-        return f"{self._emo('books')} {head}\n{format_day_numbered(items)}", "school", total
+        return f"{self._emo('books')} {head}\n{format_day_quote(items)}", "school", total
 
     # ----------------------------- концовка -----------------------------
 

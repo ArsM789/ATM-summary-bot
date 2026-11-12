@@ -2,6 +2,7 @@
 Время автосводок — в handlers/schedule.py (кнопка «⏰ Время сводок»)."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import Bot, F, Router
@@ -21,7 +22,8 @@ from database.repositories import ScheduleRepository, UserRepository
 from services.summary_service import SummaryService
 from services.time_service import is_valid_timezone, now_in, parse_timezone
 from services.weather import WeatherService
-from services.weather_models import CityNotFoundError, WeatherUnavailableError
+from services.weather_models import CityNotFoundError, WeatherUnavailableError, describe_code
+from utils.formatting import fmt_temp
 from utils.formatting import esc, join_ru
 from utils.helpers import InFlightGuard
 
@@ -126,8 +128,9 @@ async def got_city(message: Message, state: FSMContext, weather: WeatherService)
     try:
         places = await weather.search_city(query, count=5)
     except CityNotFoundError:
-        await message.answer("Не нашёл такой город. Проверь написание и попробуй ещё раз.",
-                             reply_markup=cancel_keyboard())
+        await message.answer(
+            "Не нашёл такой город. Проверь написание или добавь страну: <i>Казань, Россия</i>.",
+            reply_markup=cancel_keyboard())
         return
     except WeatherUnavailableError:
         await message.answer("Сервис поиска городов сейчас недоступен. Попробуй через минуту.",
@@ -141,7 +144,7 @@ async def got_city(message: Message, state: FSMContext, weather: WeatherService)
 
 @router.callback_query(StateFilter(CityInput.query), F.data.regexp(r"^ct:\d$"))
 async def pick_city(callback: CallbackQuery, user: User, state: FSMContext, users: UserRepository,
-                    schedules: ScheduleRepository) -> None:
+                    schedules: ScheduleRepository, weather: WeatherService) -> None:
     data = await state.get_data()
     cities = data.get("cities") or []
     index = int((callback.data or "ct:-1").split(":")[1])
@@ -152,13 +155,29 @@ async def pick_city(callback: CallbackQuery, user: User, state: FSMContext, user
     await users.update_city(user.telegram_id, place["name"], place["lat"], place["lon"])
     note = ""
     tz = place.get("tz")
-    if tz and is_valid_timezone(tz) and tz != user.timezone:
-        await users.update_timezone(user.telegram_id, tz)
-        note = f"\nЧасовой пояс заменён на <b>{esc(tz)}</b> — по месту города. Изменить можно в настройках."
+    new_tz = user.timezone
+    if tz and is_valid_timezone(tz):
+        if tz != user.timezone:
+            await users.update_timezone(user.telegram_id, tz)
+            new_tz = tz
+            note = f"\nЧасовой пояс заменён на <b>{esc(tz)}</b> — по месту города. Изменить можно в настройках."
+    else:
+        note = (f"\n⚠️ Для этого города не удалось определить часовой пояс — оставил <b>{esc(user.timezone)}</b>. "
+                "Если он неверный, поправь его в настройках.")
     await state.clear()
     await callback.answer("Город обновлён")
+
+    # Проверяем, что для выбранной точки реально приходит погода — сразу видно, что город распознан верно.
+    check = ""
+    try:
+        report = await asyncio.wait_for(weather.get_report(place["name"], place["lat"], place["lon"], new_tz), timeout=8)
+        cond = describe_code(report.current.code)
+        check = f"\nСейчас там: <b>{fmt_temp(report.current.temp, '°C')}</b>, {cond.text} {cond.emoji}"
+    except (WeatherUnavailableError, asyncio.TimeoutError):
+        check = "\n<i>Прогноз для этой точки сейчас получить не удалось — город сохранён, проверю при следующей сводке.</i>"
+
     fresh = await users.get(user.telegram_id)
-    await reply(callback, f"✅ Город: <b>{esc(place['name'])}</b>.{note}")
+    await reply(callback, f"✅ Город: <b>{esc(place['name'])}</b>.{check}{note}")
     await show_settings(callback, fresh or user, schedules)
 
 

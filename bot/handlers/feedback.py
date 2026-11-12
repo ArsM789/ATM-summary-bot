@@ -19,6 +19,7 @@ from bot.states.settings_states import FeedbackInput
 from config import Settings
 from database.models import User
 from database.repositories import FeedbackRepository
+from services.events import EventLog
 from services.feedback_format import format_feedback_for_admin
 from services.telegram_send import SendStatus, send_message_safe
 from services.time_service import get_zone
@@ -53,7 +54,7 @@ async def cancel_feedback(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(StateFilter(FeedbackInput.text), TEXT_INPUT)
 async def got_feedback(message: Message, user: User, state: FSMContext, feedback: FeedbackRepository,
-                       settings: Settings, bot: Bot) -> None:
+                       settings: Settings, bot: Bot, events: EventLog) -> None:
     text = (message.text or "").strip()
     if not text:
         await message.answer("Сообщение пустое — напиши, пожалуйста, хотя бы пару слов.")
@@ -68,10 +69,13 @@ async def got_feedback(message: Message, user: User, state: FSMContext, feedback
 
     feedback_id = await feedback.create(user.telegram_id, text)  # сохраняем до отправки: обращение не потеряется
     await state.clear()
+    await events.log("feedback", f"Новое обращение #{feedback_id} от {user.name}", user_id=user.telegram_id)
 
     if settings.admin_id is None:
         await feedback.set_status(feedback_id, "delivery_failed")
         logger.error("Обращение %s сохранено, но ADMIN_ID не задан — отправить некому", feedback_id)
+        await events.log("delivery", f"Обращение #{feedback_id} не доставлено: ADMIN_ID не задан", level="error",
+                         throttle_key="feedback-no-admin")
         await message.answer("Сейчас не могу передать сообщение автору (канал связи не настроен). Оно сохранено.")
         return
 
@@ -86,6 +90,8 @@ async def got_feedback(message: Message, user: User, state: FSMContext, feedback
     else:
         await feedback.set_status(feedback_id, "delivery_failed")
         logger.error("Не удалось доставить обращение %s администратору: %s", feedback_id, result.error)
+        await events.log("delivery", f"Обращение #{feedback_id} не доставлено админу: {str(result.error)[:120]}",
+                         level="error", user_id=user.telegram_id)
         await message.answer("Не получилось передать сообщение автору. Оно сохранено — попробуй ещё раз чуть позже.")
 
 

@@ -14,6 +14,7 @@ from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessag
 
 from config import Settings
 from database.repositories import UserRepository
+from services.events import EventLog
 from services.time_service import is_valid_timezone, now_in
 from services.tomorrow_weather import build_tomorrow, matches_query
 from services.weather import WeatherService
@@ -36,7 +37,8 @@ def _article(result_id: str, title: str, description: str, html: str) -> InlineQ
 
 
 @router.inline_query()
-async def on_inline_query(query: InlineQuery, users: UserRepository, weather: WeatherService, settings: Settings) -> None:
+async def on_inline_query(query: InlineQuery, users: UserRepository, weather: WeatherService,
+                          settings: Settings, events: EventLog) -> None:
     if not matches_query(query.query):
         await _answer(query, [], cache_time=1)
         return
@@ -56,6 +58,8 @@ async def on_inline_query(query: InlineQuery, users: UserRepository, weather: We
         forecast = build_tomorrow(report, now_in(tz))
     except (WeatherUnavailableError, asyncio.TimeoutError) as exc:
         logger.warning("Inline: погода недоступна (%s)", exc)
+        await events.log("weather", f"Inline-запрос: прогноз недоступен ({type(exc).__name__})", level="warning",
+                         throttle_key="inline-weather", throttle_seconds=300)
         forecast = None
 
     if forecast is None:

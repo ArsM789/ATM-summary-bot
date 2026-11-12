@@ -238,10 +238,10 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn("Арсений", text)
         self.assertIn("Понедельник, 9 ноября", text)
         self.assertIn("7 уроков", text)
-        # предметы — в порядке ввода, с количеством
-        self.assertLess(text.index("1. Математика × 2"), text.index("2. Русский язык"))
-        self.assertLess(text.index("2. Русский язык"), text.index("3. Физика"))
-        self.assertIn("5. Английский × 2", text)
+        # предметы — в порядке ввода, КАЖДЫЙ урок отдельной строкой, список — в цитате
+        self.assertIn("<blockquote>1. Математика\n2. Математика\n3. Русский язык\n4. Физика\n5. История\n"
+                      "6. Английский\n7. Английский</blockquote>", text)
+        self.assertNotIn("×", text)
         self.assertIn("куртк", text)
         self.assertIn("шапку", text)
         self.assertNotIn("футболк", text)
@@ -258,7 +258,7 @@ class GeneratorTests(unittest.TestCase):
         text = self.gen(now, make_report(now.date(), temp=3))
         self.assertIn("Завтра", text)
         self.assertIn("7 уроков", text)
-        self.assertIn("1. Математика × 2", text)
+        self.assertIn("<blockquote>1. Математика\n2. Математика\n3. Русский язык", text)
         self.assertNotIn("доброе утро", text.lower())
 
     def test_friday_evening_tomorrow_is_weekend(self):

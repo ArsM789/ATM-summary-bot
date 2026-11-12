@@ -14,6 +14,7 @@ from typing import Any
 
 from database.models import Broadcast
 from database.repositories import BroadcastRepository, UserRepository
+from services.events import EventLog, NullEventLog
 from services.telegram_send import SendStatus, send_message_safe
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,9 @@ class BroadcastService:
         *, send: Callable[..., Awaitable[Any]] = send_message_safe,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
+        events: EventLog | None = None,
     ) -> None:
+        self._events = events or NullEventLog()
         self._bot = bot
         self._users = users
         self._repo = repo
@@ -71,6 +74,7 @@ class BroadcastService:
         if not await self._repo.claim_start(broadcast_id, targets):
             return None
 
+        await self._events.log("broadcast", f"Рассылка #{broadcast_id} запущена: получателей {len(targets)}")
         limiter = AsyncRateLimiter(self._rate, self._clock, self._sleep)
         last_report = self._clock()
         done_since_report = 0
@@ -97,8 +101,15 @@ class BroadcastService:
                         done_since_report, last_report = 0, self._clock()
         except BaseException:
             await self._repo.finish(broadcast_id, "interrupted")
+            await self._events.log("broadcast", f"Рассылка #{broadcast_id} прервана ошибкой", level="error")
             raise
         final = await self._repo.finish(broadcast_id, "done")
+        await self._events.log(
+            "broadcast",
+            f"Рассылка #{broadcast_id} завершена: отправлено {final.success_count} из {final.total_count}, "
+            f"ошибок {final.failed_count}, недоступны {final.blocked_count}",
+            level="warning" if final.failed_count else "info",
+        )
         logger.info(
             "Рассылка %s завершена: всего %d, успешно %d, ошибок %d, недоступны %d",
             broadcast_id, final.total_count, final.success_count, final.failed_count, final.blocked_count,
