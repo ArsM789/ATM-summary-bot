@@ -17,6 +17,7 @@ from database.models import User
 from database.repositories import UserRepository
 from services.names import InvalidNameError, parse_single_name, parse_variants
 from utils.formatting import esc, join_ru
+from bot.handlers.start import DEVELOPMENT_NOTICE
 
 router = Router(name="onboarding")
 router.message.filter(F.chat.type == ChatType.PRIVATE)
@@ -24,7 +25,7 @@ router.message.filter(F.chat.type == ChatType.PRIVATE)
 ASK_NAME = "Привет! Давай познакомимся. Как тебя зовут?"
 ASK_VARIANTS = (
     "А как мне тебя называть?\n\n"
-    "Например, если тебя зовут Артём, можно указать:\n<i>Артём, Тёма, Темыч</i>.\n\n"
+    "Например, если тебя зовут Артём, можно указать:\n<i>Артём, Тёма</i>.\n\n"
     "Если Софья:\n<i>Софья, Софа, Соф</i>.\n\n"
     "Напиши варианты, которыми тебе комфортно пользоваться, через запятую. Я буду иногда менять их, "
     "чтобы общение не выглядело однообразным.\n\n"
@@ -57,13 +58,15 @@ async def _finish(event: Message | CallbackQuery, state: FSMContext, users: User
                   user_id: int, main_name: str, variants: list[str]) -> None:
     await users.set_names(user_id, main_name, variants)
     await state.clear()
+    await reply(event, DEVELOPMENT_NOTICE)
     await reply(
         event,
         f"Приятно познакомиться, {esc(main_name)}! 👋\n"
         f"Буду обращаться к тебе так: <b>{esc(join_ru(variants))}</b>.\n\n"
         f"Изменить это можно в «⚙️ Настройки». Что дальше:\n"
         f"📅 <b>Моё расписание</b> — внеси уроки, чтобы они попадали в сводку\n"
-        f"🌤 <b>Сводка</b> — посмотреть, как она выглядит",
+        f"📅 <b>Мои события</b> — твои занятия / кружки и любые другие задачи\n"
+        f"🌤 <b>Сводка</b> — Твоя личная сводка с погодой, рекомендациями по одежде, а также твоими уроками и занятиями (если ты их добавил) в этот день",
         reply_markup=main_menu(),
     )
 
