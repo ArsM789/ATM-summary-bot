@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -20,17 +22,13 @@ logger = logging.getLogger(__name__)
 
 class SummaryScheduler:
     def __init__(
-            self,
-            dispatcher: SummaryDispatcher,
-            tomorrow_dispatcher=None,
-            interval_seconds: int = 30,
-            events: EventLog | None = None,
+        self, dispatcher: SummaryDispatcher, interval_seconds: int = 30, events: EventLog | None = None,
+        extra_runners: Sequence[Callable[[], Awaitable[Any]]] = (),
     ) -> None:
-        self._dispatchers = [dispatcher]
-
-        if tomorrow_dispatcher is not None:
-            self._dispatchers.append(tomorrow_dispatcher)
-
+        """extra_runners — дополнительные «исполнители» того же прохода (например, напоминания о событиях):
+        один APScheduler-job на всё, второй планировщик не нужен."""
+        self._dispatcher = dispatcher
+        self._extra_runners = tuple(extra_runners)
         self._events = events or NullEventLog()
         self._interval = interval_seconds
         self._scheduler: AsyncIOScheduler | None = None
@@ -51,25 +49,15 @@ class SummaryScheduler:
         logger.info("Планировщик сводок запущен (проход каждые %d с)", self._interval)
 
     async def _tick(self) -> None:
-        for dispatcher in self._dispatchers:
+        # Каждый исполнитель — в своём try: сбой сводок не мешает напоминаниям и наоборот.
+        for name, runner in (("summaries", self._dispatcher.run_once), *(
+                (getattr(r, "__qualname__", "runner"), r) for r in self._extra_runners)):
             try:
-                await dispatcher.run_once()
-            except Exception as exc:
-                logger.exception(
-                    "Сбой диспетчера %s",
-                    type(dispatcher).__name__,
-                )
-
-                await self._events.log(
-                    "error",
-                    (
-                        f"Сбой диспетчера {type(dispatcher).__name__}: "
-                        f"{type(exc).__name__}: {str(exc)[:150]}"
-                    ),
-                    level="error",
-                    throttle_key=f"dispatcher-{type(dispatcher).__name__}",
-                    throttle_seconds=300,
-                )
+                await runner()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Сбой прохода планировщика (%s)", name)
+                await self._events.log("error", f"Сбой прохода планировщика ({name}): {type(exc).__name__}: {str(exc)[:150]}",
+                                       level="error", throttle_key=f"scheduler-tick-{name}", throttle_seconds=300)
 
     def shutdown(self) -> None:
         if self._scheduler and self._scheduler.running:

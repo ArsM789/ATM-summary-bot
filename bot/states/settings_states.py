@@ -29,3 +29,18 @@ class FeedbackInput(StatesGroup):
 
 class AdminBroadcast(StatesGroup):
     text = State()
+
+
+class EventForm(StatesGroup):
+    """Диалог создания/изменения события («📅 Мои события»)."""
+
+    title = State()
+    repeat = State()
+    weekdays = State()
+    date = State()
+    month_day = State()
+    time = State()
+    duration = State()
+    remind = State()
+    remind_custom = State()
+    preview = State()

@@ -12,7 +12,7 @@ import aiosqlite
 from config import Settings
 from database.database import Database
 from database.models import (
-    ALL_WEEKDAYS_MASK, Broadcast, EventRecord, FeedbackRecord, LessonItem, ScheduleEntry, User,
+    ALL_WEEKDAYS_MASK, Broadcast, EventRecord, FeedbackRecord, LessonItem, ScheduleEntry, User, UserEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +61,8 @@ def _user(row: aiosqlite.Row) -> User:
         last_used_name=row["last_used_name"],
         name_confirmed=bool(row["name_confirmed"]),
         bot_blocked=bool(row["bot_blocked"]),
+        event_reminders_enabled=bool(row["event_reminders_enabled"]),
+        default_remind_minutes=row["default_remind_minutes"],
     )
 
 
@@ -163,6 +165,25 @@ class UserRepository:
             await conn.execute(
                 "UPDATE schedules SET effective_from = ? WHERE user_id = ?", (int(time.time()), user_id)
             )
+            # «16:00» в событии — это 16:00 по времени пользователя: события следуют за его поясом,
+            # а напоминания «пересчитываются» с текущего момента (без отправки задним числом).
+            await conn.execute(
+                "UPDATE calendar_events SET timezone = ?, effective_from = ? WHERE user_id = ? AND event_type = 'routine'",
+                (timezone, int(time.time()), user_id),
+            )
+
+    async def set_event_settings(self, user_id: int, *, reminders_enabled: bool | None = None,
+                                 default_remind_minutes: int | None = None) -> None:
+        if reminders_enabled is not None:
+            await self._db.execute(
+                "UPDATE users SET event_reminders_enabled = ? WHERE telegram_id = ?", (int(reminders_enabled), user_id)
+            )
+        if default_remind_minutes is not None:
+            if not 1 <= default_remind_minutes <= 1440:
+                raise ValueError("Время напоминания должно быть от 1 до 1440 минут")
+            await self._db.execute(
+                "UPDATE users SET default_remind_minutes = ? WHERE telegram_id = ?", (default_remind_minutes, user_id)
+            )
 
     async def set_notifications_enabled(self, user_id: int, enabled: bool) -> None:
         async with self._db.transaction() as conn:
@@ -200,14 +221,6 @@ class UserRepository:
             (exclude_id if exclude_id is not None else -1,),
         )
         return [(r["telegram_id"], bool(r["bot_blocked"])) for r in rows]
-
-    async def list_notification_targets(self) -> list[User]:
-        """Пользователи с включёнными уведомлениями, не заблокировавшие бота."""
-        rows = await self._db.fetchall(
-            "SELECT * FROM users "
-            "WHERE notifications_enabled = 1 AND bot_blocked = 0"
-        )
-        return [_user(row) for row in rows]
 
 
 # ============================================================ расписание уроков
@@ -611,3 +624,200 @@ class EventLogRepository:
         if older_than_ts is not None:
             removed += await self._db.execute("DELETE FROM event_log WHERE ts < ?", (older_than_ts,))
         return removed
+
+
+# ============================================================ события пользователя («Мои события»)
+
+EVENT_TYPE = "routine"
+RECURRENCES = ("none", "daily", "weekly", "monthly")
+STATUSES = ("active", "disabled", "done")
+EVENT_COLUMNS = (
+    "id, user_id, title, recurrence, weekdays_mask, month_day, event_date, start_time, duration_min, "
+    "remind_before_min, timezone, status, effective_from, created_at"
+)
+
+
+class EventLimitError(Exception):
+    """Достигнут лимит активных событий (MAX_USER_EVENTS)."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"limit {limit}")
+        self.limit = limit
+
+
+def _user_event(row: aiosqlite.Row) -> UserEvent:
+    return UserEvent(
+        id=row["id"], user_id=row["user_id"], title=row["title"], recurrence=row["recurrence"],
+        weekdays_mask=row["weekdays_mask"], month_day=row["month_day"], event_date=row["event_date"],
+        start_time=row["start_time"], duration_min=row["duration_min"], remind_before_min=row["remind_before_min"],
+        timezone=row["timezone"], status=row["status"], effective_from=row["effective_from"],
+        created_at=row["created_at"] or "",
+    )
+
+
+def validate_event_fields(f: dict) -> None:
+    """Последний рубеж проверки данных перед записью (основная валидация — в services/event_input.py)."""
+    if not str(f["title"]).strip():
+        raise ValueError("Название события пустое")
+    if f["recurrence"] not in RECURRENCES:
+        raise ValueError("Неизвестный тип повторения")
+    if not 1 <= int(f["duration_min"]) <= 1440:
+        raise ValueError("Продолжительность — от 1 минуты до 24 часов")
+    if not 1 <= int(f["remind_before_min"]) <= 1440:
+        raise ValueError("Напоминание — от 1 до 1440 минут")
+    if f["recurrence"] == "weekly" and not 1 <= int(f["weekdays_mask"]) <= 127:
+        raise ValueError("Для еженедельного события нужен хотя бы один день")
+    if f["recurrence"] == "monthly" and f.get("month_day") not in (-1, *range(1, 32)):
+        raise ValueError("Для ежемесячного события нужно число месяца")
+    if f["recurrence"] == "none" and not f.get("event_date"):
+        raise ValueError("Для разового события нужна дата")
+
+
+class UserEventRepository:
+    """События пользователя. Всё — в таблице calendar_events (event_type='routine'); каждый метод привязан
+    к user_id, поэтому чужое событие нельзя ни увидеть, ни изменить, ни удалить."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def count_active(self, user_id: int) -> int:
+        row = await self._db.fetchone(
+            "SELECT COUNT(*) AS n FROM calendar_events WHERE user_id = ? AND event_type = ? AND status = 'active'",
+            (user_id, EVENT_TYPE),
+        )
+        return row["n"]
+
+    async def create(self, user_id: int, fields: dict, *, max_active: int) -> UserEvent:
+        """Создаёт активное событие. Лимит проверяется и применяется в одной транзакции."""
+        validate_event_fields(fields)
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) AS n FROM calendar_events WHERE user_id = ? AND event_type = ? AND status = 'active'",
+                (user_id, EVENT_TYPE),
+            )
+            if (await cursor.fetchone())["n"] >= max_active:
+                raise EventLimitError(max_active)
+            cursor = await conn.execute(
+                "INSERT INTO calendar_events (user_id, event_type, title, event_date, start_time, end_time, recurrence, "
+                "weekdays_mask, month_day, duration_min, remind_before_min, timezone, status, effective_from) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+                (user_id, EVENT_TYPE, fields["title"].strip(), fields.get("event_date"), fields["start_time"],
+                 fields.get("end_time"), fields["recurrence"], fields.get("weekdays_mask", 0), fields.get("month_day"),
+                 fields["duration_min"], fields["remind_before_min"], fields["timezone"], int(time.time())),
+            )
+            new_id = cursor.lastrowid
+        event = await self.get(user_id, new_id)
+        assert event is not None
+        return event
+
+    async def get(self, user_id: int, event_id: int) -> UserEvent | None:
+        row = await self._db.fetchone(
+            f"SELECT {EVENT_COLUMNS} FROM calendar_events WHERE id = ? AND user_id = ? AND event_type = ?",
+            (event_id, user_id, EVENT_TYPE),
+        )
+        return _user_event(row) if row else None
+
+    async def list_for_user(self, user_id: int) -> list[UserEvent]:
+        """Активные и отключённые (завершённые разовые не показываем)."""
+        rows = await self._db.fetchall(
+            f"SELECT {EVENT_COLUMNS} FROM calendar_events WHERE user_id = ? AND event_type = ? "
+            "AND status IN ('active', 'disabled') ORDER BY id",
+            (user_id, EVENT_TYPE),
+        )
+        return [_user_event(r) for r in rows]
+
+    async def update(self, user_id: int, event_id: int, fields: dict) -> bool:
+        """Редактирование любых полей без создания нового события. Лимит НЕ перепроверяется.
+        effective_from сдвигается на «сейчас»: после правки напоминания «задним числом» не шлются."""
+        validate_event_fields(fields)
+        return await self._db.execute(
+            "UPDATE calendar_events SET title = ?, event_date = ?, start_time = ?, end_time = ?, recurrence = ?, "
+            "weekdays_mask = ?, month_day = ?, duration_min = ?, remind_before_min = ?, timezone = ?, effective_from = ? "
+            "WHERE id = ? AND user_id = ? AND event_type = ? AND status IN ('active', 'disabled')",
+            (fields["title"].strip(), fields.get("event_date"), fields["start_time"], fields.get("end_time"),
+             fields["recurrence"], fields.get("weekdays_mask", 0), fields.get("month_day"), fields["duration_min"],
+             fields["remind_before_min"], fields["timezone"], int(time.time()), event_id, user_id, EVENT_TYPE),
+        ) > 0
+
+    async def set_status(self, user_id: int, event_id: int, status: str, *, max_active: int | None = None) -> str:
+        """active/disabled. Возвращает: ok | missing | done | limit | same. Включение проверяет лимит."""
+        if status not in ("active", "disabled"):
+            raise ValueError(status)
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(
+                "SELECT status FROM calendar_events WHERE id = ? AND user_id = ? AND event_type = ?",
+                (event_id, user_id, EVENT_TYPE),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return "missing"
+            if row["status"] == "done":
+                return "done"
+            if row["status"] == status:
+                return "same"
+            if status == "active" and max_active is not None:
+                cursor = await conn.execute(
+                    "SELECT COUNT(*) AS n FROM calendar_events WHERE user_id = ? AND event_type = ? AND status = 'active'",
+                    (user_id, EVENT_TYPE),
+                )
+                if (await cursor.fetchone())["n"] >= max_active:
+                    return "limit"
+            await conn.execute(
+                "UPDATE calendar_events SET status = ?, effective_from = ? WHERE id = ? AND user_id = ?",
+                (status, int(time.time()), event_id, user_id),
+            )
+            return "ok"
+
+    async def delete(self, user_id: int, event_id: int) -> bool:
+        """Удаляет событие и его записи в журнале напоминаний (будущие уведомления исчезают вместе с ним)."""
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(
+                "DELETE FROM calendar_events WHERE id = ? AND user_id = ? AND event_type = ?",
+                (event_id, user_id, EVENT_TYPE),
+            )
+            if cursor.rowcount == 0:
+                return False
+            await conn.execute(
+                "DELETE FROM notification_log WHERE user_id = ? AND notification_type = 'event' AND slot LIKE ?",
+                (user_id, f"{event_id}@%"),
+            )
+            return True
+
+    async def list_active_with_users(self) -> list[tuple[UserEvent, User]]:
+        """Все активные события вместе с владельцами — для планировщика напоминаний."""
+        rows = await self._db.fetchall(
+            "SELECT e.id AS e_id, e.user_id AS e_user_id, e.title AS e_title, e.recurrence AS e_recurrence, "
+            "e.weekdays_mask AS e_weekdays_mask, e.month_day AS e_month_day, e.event_date AS e_event_date, "
+            "e.start_time AS e_start_time, e.duration_min AS e_duration_min, e.remind_before_min AS e_remind, "
+            "e.timezone AS e_timezone, e.status AS e_status, e.effective_from AS e_effective_from, "
+            "e.created_at AS e_created_at, u.* "
+            "FROM calendar_events e JOIN users u ON u.telegram_id = e.user_id "
+            "WHERE e.event_type = ? AND e.status = 'active'",
+            (EVENT_TYPE,),
+        )
+        result = []
+        for r in rows:
+            event = UserEvent(
+                id=r["e_id"], user_id=r["e_user_id"], title=r["e_title"], recurrence=r["e_recurrence"],
+                weekdays_mask=r["e_weekdays_mask"], month_day=r["e_month_day"], event_date=r["e_event_date"],
+                start_time=r["e_start_time"], duration_min=r["e_duration_min"], remind_before_min=r["e_remind"],
+                timezone=r["e_timezone"], status=r["e_status"], effective_from=r["e_effective_from"],
+                created_at=r["e_created_at"] or "",
+            )
+            result.append((event, _user(r)))
+        return result
+
+    async def mark_done(self, event_id: int) -> bool:
+        """Разовое событие прошло: больше не активно (и не занимает лимит)."""
+        return await self._db.execute(
+            "UPDATE calendar_events SET status = 'done' WHERE id = ? AND event_type = ? AND recurrence = 'none' "
+            "AND status = 'active'",
+            (event_id, EVENT_TYPE),
+        ) > 0
+
+    async def prune_done(self, older_than_days: int = 60) -> int:
+        return await self._db.execute(
+            "DELETE FROM calendar_events WHERE event_type = ? AND status = 'done' "
+            "AND created_at < datetime('now', ?)",
+            (EVENT_TYPE, f"-{int(older_than_days)} days"),
+        )

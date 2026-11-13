@@ -297,7 +297,7 @@ class MigrationV3Tests(unittest.IsolatedAsyncioTestCase):
 
             db = Database(path); await db.connect()                           # обновление до v3
             try:
-                self.assertEqual((await db.fetchone("PRAGMA user_version"))[0], 3)
+                self.assertEqual((await db.fetchone("PRAGMA user_version"))[0], migrations.LATEST_VERSION)   # дошла до актуальной
                 self.assertEqual((await db.fetchone("SELECT name FROM users WHERE telegram_id = 5"))["name"], "Анна")
                 self.assertEqual((await db.fetchone("SELECT COUNT(*) n FROM weekly_schedule"))["n"], 1)
                 self.assertEqual((await db.fetchone("SELECT COUNT(*) n FROM event_log"))["n"], 0)

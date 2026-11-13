@@ -23,7 +23,7 @@ from database.schema import SCHEMA
 def make_settings(tmp: Path) -> Settings:
     return Settings(
         bot_token="1:x", bot_name="T", default_city="Казань", default_latitude=55.79, default_longitude=49.12,
-        default_timezone="Europe/Moscow", default_send_time="07:00", admin_id=1, broadcast_rate=15.0,
+        default_timezone="Europe/Moscow", default_send_time="07:00", admin_id=1, broadcast_rate=15.0, max_user_events=10,
         database_path=tmp / "t.db", weather_cache_ttl=0, weather_timeout=5, weather_retries=0,
         log_level="INFO", custom_emoji={},
     )

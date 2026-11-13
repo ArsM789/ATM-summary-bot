@@ -95,6 +95,6 @@ async def got_feedback(message: Message, user: User, state: FSMContext, feedback
         await message.answer("Не получилось передать сообщение автору. Оно сохранено — попробуй ещё раз чуть позже.")
 
 
-@router.message(StateFilter(FeedbackInput.text))
+@router.message(StateFilter(FeedbackInput.text), ~F.text)
 async def feedback_not_text(message: Message) -> None:
     await message.answer("Пока я принимаю только текст. Напиши обращение словами.")

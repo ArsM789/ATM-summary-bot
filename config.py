@@ -31,6 +31,7 @@ class Settings:
     default_send_time: str
     admin_id: int | None
     broadcast_rate: float
+    max_user_events: int
     database_path: Path
     weather_cache_ttl: int
     weather_timeout: float
@@ -79,6 +80,19 @@ def _parse_admin_id(raw: str) -> int | None:
     return int(raw)
 
 
+DEFAULT_MAX_USER_EVENTS = 10
+
+
+def _parse_max_events(raw: str) -> int:
+    """MAX_USER_EVENTS: максимум АКТИВНЫХ событий на пользователя. Пусто/нет переменной -> 10."""
+    raw = raw.strip()
+    if not raw:
+        return DEFAULT_MAX_USER_EVENTS
+    if not raw.isascii() or not raw.isdigit() or int(raw) < 1:
+        raise ConfigError(f"MAX_USER_EVENTS должен быть положительным целым числом, получено: {raw!r}")
+    return int(raw)
+
+
 def _parse_custom_emoji(raw: str) -> dict[str, str]:
     if not raw.strip():
         return {}
@@ -124,7 +138,7 @@ def load_settings() -> Settings:
 
     return Settings(
         bot_token=token,
-        bot_name=os.getenv("BOT_NAME", "ATM Morning Assistant").strip() or "ATM Morning Assistant",
+        bot_name=os.getenv("BOT_NAME", "ATM Morning Assistant").strip() or "Deylo",
         default_city=os.getenv("DEFAULT_CITY", "Казань").strip() or "Казань",
         default_latitude=_get_float("DEFAULT_LATITUDE", 55.7887, -90, 90),
         default_longitude=_get_float("DEFAULT_LONGITUDE", 49.1221, -180, 180),
@@ -132,6 +146,7 @@ def load_settings() -> Settings:
         default_send_time=send_time,
         admin_id=_parse_admin_id(os.getenv("ADMIN_ID", "")),
         broadcast_rate=_get_float("BROADCAST_RATE", 15, 1, 28),
+        max_user_events=_parse_max_events(os.getenv("MAX_USER_EVENTS", "")),
         database_path=db_path,
         weather_cache_ttl=_get_int("WEATHER_CACHE_TTL", 600, 0, 3600),
         weather_timeout=_get_float("WEATHER_TIMEOUT", 10, 2, 60),

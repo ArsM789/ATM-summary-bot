@@ -12,8 +12,8 @@ from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.types import BotCommand
 
 from bot.handlers import (
-    admin, errors, fallback, feedback, inline_mode, lessons, onboarding, schedule,
-    settings as settings_handlers, start, summary,
+    admin, errors, events as events_handlers, fallback, feedback, inline_mode, lessons, onboarding,
+    schedule, settings as settings_handlers, start, summary,
 )
 from bot.keyboards.main_menu import summary_keyboard
 from bot.middlewares import UserMiddleware
@@ -21,14 +21,11 @@ from config import BASE_DIR, ConfigError, load_settings
 from database.database import Database
 from database.repositories import (
     BroadcastRepository, EventLogRepository, FeedbackRepository, NotificationLogRepository,
-    ScheduleRepository, UserRepository, WeeklyScheduleRepository,
+    ScheduleRepository, UserEventRepository, UserRepository, WeeklyScheduleRepository,
 )
 from services.broadcast import BroadcastService
 from services.delivery import SummaryDispatcher
-from services.tomorrow_brief_generator import TomorrowBriefGenerator
-from services.tomorrow_brief_service import TommorowBriefService
-from services.tomorrow_brief_dispatcher import TomorrowBriefDispatcher
-
+from services.event_reminders import EventReminderDispatcher
 from services.events import EventLog
 from services.scheduler import SummaryScheduler
 from services.summary_generator import SummaryGenerator
@@ -44,6 +41,7 @@ COMMANDS = [
     BotCommand(command="summary", description="Получить сводку сейчас"),
     BotCommand(command="settings", description="Настройки"),
     BotCommand(command="lessons", description="Моё расписание уроков"),
+    BotCommand(command="events", description="Мои события и напоминания"),
     BotCommand(command="schedule", description="Время автосводок"),
     BotCommand(command="feedback", description="Сообщить об ошибке / идея"),
     BotCommand(command="help", description="Помощь и меню"),
@@ -77,18 +75,11 @@ async def main() -> int:
     weekly = WeeklyScheduleRepository(db)
     schedules = ScheduleRepository(db)
     notification_log = NotificationLogRepository(db)
+    user_events = UserEventRepository(db)
     feedback_repo = FeedbackRepository(db)
     broadcast_repo = BroadcastRepository(db)
     generator = SummaryGenerator(EmojiPack(settings.custom_emoji))
     summaries = SummaryService(weekly, users, weather, generator, events=events)
-    tomorrow_generator = TomorrowBriefGenerator(
-        EmojiPack(settings.custom_emoji),
-    )
-
-    tomorrow_briefs = TommorowBriefService(
-        weekly, users, weather, tomorrow_generator,
-    )
-
 
     interrupted = await broadcast_repo.mark_interrupted()  # рассылки, оборванные прошлым перезапуском
     if interrupted:
@@ -103,32 +94,17 @@ async def main() -> int:
     )
     broadcast = BroadcastService(bot, users, broadcast_repo, settings.broadcast_rate, events=events)
     dispatcher = SummaryDispatcher(
-        bot,
-        users,
-        schedules,
-        notification_log,
-        summaries,
-        reply_markup=summary_keyboard(),
-        events=events,
+        bot, users, schedules, notification_log, summaries, reply_markup=summary_keyboard(), events=events
     )
-    tomorrow_dispatcher = TomorrowBriefDispatcher(
-        bot,
-        users,
-        notification_log,
-        tomorrow_briefs,
-    )
-
-    scheduler = SummaryScheduler(
-        dispatcher,
-        tomorrow_dispatcher=tomorrow_dispatcher,
-        events=events,
-    )
+    reminders = EventReminderDispatcher(bot, users, user_events, notification_log, event_log=events)
+    # Один APScheduler-job на всё: сводки + напоминания о событиях (независимые исполнители одного прохода).
+    scheduler = SummaryScheduler(dispatcher, events=events, extra_runners=[reminders.run_once])
 
     dp = Dispatcher()  # FSM: MemoryStorage, ключ (бот, чат, пользователь) — состояния изолированы
     dp.workflow_data.update(
         settings=settings, users=users, weekly=weekly, schedules=schedules, feedback=feedback_repo,
         weather=weather, summaries=summaries, broadcast=broadcast, guard=InFlightGuard(),
-        events=events, event_repo=event_repo,
+        events=events, event_repo=event_repo, user_events=user_events,
     )
     middleware = UserMiddleware(users)
     dp.message.outer_middleware(middleware)
@@ -142,6 +118,7 @@ async def main() -> int:
     dp.include_router(lessons.router)
     dp.include_router(settings_handlers.router)
     dp.include_router(schedule.router)
+    dp.include_router(events_handlers.router)
     dp.include_router(feedback.router)
     dp.include_router(admin.router)
     dp.include_router(inline_mode.router)

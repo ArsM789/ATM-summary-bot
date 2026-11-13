@@ -150,6 +150,15 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(config.ConfigError, msg=str(bad)):
                 self.load(**env)
 
+    def test_max_user_events(self):
+        self.assertEqual(self.load(BOT_TOKEN=self.TOKEN).max_user_events, 10)                       # по умолчанию
+        self.assertEqual(self.load(BOT_TOKEN=self.TOKEN, MAX_USER_EVENTS="").max_user_events, 10)   # пустое значение
+        self.assertEqual(self.load(BOT_TOKEN=self.TOKEN, MAX_USER_EVENTS=" 25 ").max_user_events, 25)
+        self.assertEqual(self.load(BOT_TOKEN=self.TOKEN, MAX_USER_EVENTS="1").max_user_events, 1)
+        for bad in ("0", "-3", "abc", "2.5", "10 событий", "١٠"):
+            with self.assertRaises(config.ConfigError, msg=bad):
+                self.load(BOT_TOKEN=self.TOKEN, MAX_USER_EVENTS=bad)
+
     def test_default_lessons_removed(self):
         self.assertFalse(hasattr(self.load(BOT_TOKEN=self.TOKEN), "default_lessons"))
 

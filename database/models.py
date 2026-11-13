@@ -34,6 +34,8 @@ class User:
     last_used_name: str | None = None
     name_confirmed: bool = False    # False — имя ещё не вводилось пользователем
     bot_blocked: bool = False
+    event_reminders_enabled: bool = True   # напоминания о событиях («Мои события»)
+    default_remind_minutes: int = 15       # за сколько минут напоминать по умолчанию
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,3 +110,28 @@ class EventRecord:
     category: str
     message: str
     user_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class UserEvent:
+    """Событие пользователя («Урок английского», вт/чт 16:00–18:00). Хранится ПРАВИЛО повторения,
+    а не отдельные записи на каждую дату — ближайшие вхождения вычисляются (services/event_schedule.py)."""
+
+    id: int
+    user_id: int
+    title: str
+    recurrence: str            # none | daily | weekly | monthly
+    weekdays_mask: int         # weekly: биты Пн..Вс
+    month_day: int | None      # monthly: 1..31 или -1 (последний день месяца)
+    event_date: str | None     # none: дата события; recurring: первая возможная дата («ГГГГ-ММ-ДД»)
+    start_time: str            # «ЧЧ:ММ» по часовому поясу события
+    duration_min: int
+    remind_before_min: int
+    timezone: str
+    status: str                # active | disabled | done
+    effective_from: int = 0
+    created_at: str = ""
+
+    @property
+    def weekdays(self) -> tuple[int, ...]:
+        return mask_to_weekdays(self.weekdays_mask)

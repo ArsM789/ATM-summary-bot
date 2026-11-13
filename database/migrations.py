@@ -16,7 +16,7 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-LATEST_VERSION = 3
+LATEST_VERSION = 4
 
 
 async def _columns(conn: aiosqlite.Connection, table: str) -> set[str]:
@@ -169,7 +169,28 @@ async def _migrate_to_3(conn: aiosqlite.Connection) -> None:
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_event_log_category_ts ON event_log(category, ts)")
 
 
-_MIGRATIONS = {2: _migrate_to_2, 3: _migrate_to_3}
+async def _migrate_to_4(conn: aiosqlite.Connection) -> None:
+    """«Мои события»: расширяем существующую таблицу calendar_events (создана в v2 как задел и пуста),
+    а не заводим вторую сущность. Старые строки (если появятся) получают безопасные значения по умолчанию."""
+    for column, ddl in (
+        ("recurrence", "TEXT NOT NULL DEFAULT 'none'"),        # none | daily | weekly | monthly
+        ("weekdays_mask", "INTEGER NOT NULL DEFAULT 0"),       # для weekly: биты Пн..Вс
+        ("month_day", "INTEGER"),                              # для monthly: 1..31 или -1 (последний день)
+        ("duration_min", "INTEGER NOT NULL DEFAULT 60"),
+        ("remind_before_min", "INTEGER NOT NULL DEFAULT 15"),
+        ("timezone", "TEXT NOT NULL DEFAULT 'UTC'"),
+        ("status", "TEXT NOT NULL DEFAULT 'active'"),          # active | disabled | done (разовое прошло)
+        ("effective_from", "INTEGER NOT NULL DEFAULT 0"),      # unix: напоминания раньше этого момента не шлём
+    ):
+        await _add_column(conn, "calendar_events", column, ddl)
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_calendar_events_status ON calendar_events(event_type, status)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_calendar_events_user_status ON calendar_events(user_id, event_type, status)")
+    # Настройки напоминаний пользователя.
+    await _add_column(conn, "users", "event_reminders_enabled", "INTEGER NOT NULL DEFAULT 1")
+    await _add_column(conn, "users", "default_remind_minutes", "INTEGER NOT NULL DEFAULT 15")
+
+
+_MIGRATIONS = {2: _migrate_to_2, 3: _migrate_to_3, 4: _migrate_to_4}
 
 
 def _backup_sync(path: Path, version: int) -> Path:
