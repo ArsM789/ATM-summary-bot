@@ -53,7 +53,7 @@ _PRECIP_WORDS = {
 @dataclass(frozen=True)
 class SummaryContext:
     user: User
-    schedule: Mapping[int, Sequence[LessonItem]]  # расписание ЭТОГО пользователя: 0 = понедельник ... 4 = пятница
+    schedule: Mapping[int, Sequence[LessonItem]]  # расписание ЭТОГО пользователя: 0 = понедельник ... 5 = суббота
     now: datetime                                 # aware, в часовом поясе пользователя
     report: WeatherReport | None                  # None — погоду получить не удалось
     address: str | None = None                    # выбранный вариант обращения (None -> основное имя)
@@ -295,7 +295,7 @@ class SummaryGenerator:
         weekday_index = focus.focus_date.weekday()
         weekday = weekday_name(focus.focus_date)
 
-        if weekday_index >= 5:
+        if weekday_index == 6:
             text = self._pick(uid, "weekend", [
                 f"{self._emo('party')} {when} выходной — уроков нет.",
                 f"{self._emo('party')} {when} {weekday}, уроков нет.",
@@ -303,6 +303,14 @@ class SummaryGenerator:
             return text, "weekend", 0
 
         items = list(schedule.get(weekday_index, ()))
+
+        if weekday_index == 5 and not items:
+            text = self._pick(uid, "weekend", [
+                f"{self._emo('party')} {when} выходной — уроков нет.",
+                f"{self._emo('party')} {when} {weekday}, уроков нет.",
+            ])
+            return text, "weekend", 0
+
         if not items:
             return (
                 f"{self._emo('books')} Расписание на {WEEKDAYS_ACC[weekday_index]} пока не заполнено — "

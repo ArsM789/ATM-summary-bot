@@ -2,6 +2,8 @@
 Тот же диалог открывается из «⚙️ Настройки → Имя и обращения» (edit=True)."""
 from __future__ import annotations
 
+import asyncio
+
 from aiogram import F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import StateFilter
@@ -59,6 +61,7 @@ async def _finish(event: Message | CallbackQuery, state: FSMContext, users: User
     await users.set_names(user_id, main_name, variants)
     await state.clear()
     await reply(event, DEVELOPMENT_NOTICE)
+    await asyncio.sleep(2)
     await reply(
         event,
         f"Приятно познакомиться, {esc(main_name)}! 👋\n"

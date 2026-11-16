@@ -33,7 +33,7 @@ from utils.formatting import capitalize_first, esc, lessons_phrase
 router = Router(name="lessons")
 router.message.filter(F.chat.type == ChatType.PRIVATE)
 
-SCHOOL_DAYS = range(5)
+SCHOOL_DAYS = range(6)
 
 FORMAT_HELP = (
     "Каждый предмет — с новой строки (или через запятую):\n"
@@ -75,7 +75,7 @@ async def _overview_text(weekly: WeeklyScheduleRepository, user_id: int) -> str:
             lines.append(format_day_quote(items))
         else:
             lines.append(f"<b>{_day_name(d)}</b> — не заполнено")
-    lines.append("\n<i>Суббота и воскресенье — выходные. Выбери день, чтобы изменить его.</i>")
+    lines.append("\n<i>Воскресенье — выходной. Выбери день, чтобы изменить его.</i>")
     return "\n".join(lines)
 
 
@@ -146,7 +146,7 @@ async def _start_week(event: CallbackQuery, state: FSMContext) -> None:
         "📋 Вставь расписание на неделю <b>одним сообщением</b>, с названиями дней:\n"
         "<code>Понедельник\nМатематика - 2\nФизика\n\nВторник: Алгебра, Геометрия, Биология - 2</code>\n"
         "Подойдут полные названия и сокращения (Пн, Вт…). Предмет без числа — один урок. "
-        "Дни, которых нет в сообщении, не изменятся; суббота и воскресенье пропускаются.",
+        "Дни, которых нет в сообщении, не изменятся; воскресенье пропускаются.",
         reply_markup=input_keyboard(False),
     )
 
@@ -297,7 +297,7 @@ async def _handle_week(message: Message, state: FSMContext) -> None:
     if result.empty_days:
         notes.append("Без предметов, не изменятся: " + ", ".join(_day_name(d).lower() for d in result.empty_days) + ".")
     if result.weekend_skipped:
-        notes.append("Суббота и воскресенье пропущены — это выходные.")
+        notes.append("Воскресенье пропущено — это выходной.")
     untouched = [d for d in SCHOOL_DAYS if d not in days]
     if untouched:
         notes.append("Не будут затронуты: " + ", ".join(_day_name(d).lower() for d in untouched) + ".")
@@ -377,7 +377,7 @@ async def save_pending(callback: CallbackQuery, user: User, weekly: WeeklySchedu
         return
     await callback.answer("Сохранено ✅")
 
-    if data.get("wizard") and weekday < 4:
+    if data.get("wizard") and weekday < 5:
         await _start_input(callback, state, weekly, user.telegram_id, weekday + 1, "replace", wizard=True)
         return
     await state.clear()
@@ -394,7 +394,7 @@ async def skip_day(callback: CallbackQuery, user: User, weekly: WeeklyScheduleRe
     data = await state.get_data()
     weekday = data.get("weekday")
     await callback.answer()
-    if data.get("wizard") and weekday is not None and weekday < 4:
+    if data.get("wizard") and weekday is not None and weekday < 5:
         await _start_input(callback, state, weekly, user.telegram_id, weekday + 1, "replace", wizard=True)
         return
     await state.clear()

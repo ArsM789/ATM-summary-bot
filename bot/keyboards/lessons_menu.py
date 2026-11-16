@@ -9,7 +9,7 @@ from services.time_service import WEEKDAYS_SHORT
 
 def overview_keyboard() -> InlineKeyboardMarkup:
     return markup(
-        [button(WEEKDAYS_SHORT[d], f"ls:day:{d}") for d in range(5)],
+        [button(WEEKDAYS_SHORT[d], f"ls:day:{d}") for d in range(6)],
         [button("📝 Заполнить по дням", "ls:fill"), button("📋 Вставить неделю", "ls:week")],
     )
 
