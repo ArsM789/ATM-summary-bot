@@ -26,6 +26,7 @@ class NeedsOnboarding(BaseFilter):
         return user is not None and not user.name_confirmed and raw_state is None
 
 
+
 # Обычный текст, введённый пользователем в диалоге: не кнопка меню и не команда.
 # Благодаря этому нажатие кнопки меню посреди диалога не принимается за «имя» или «предмет».
 TEXT_INPUT = F.text & ~F.text.in_(MENU_TEXTS) & ~F.text.startswith("/")
