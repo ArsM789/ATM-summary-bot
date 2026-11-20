@@ -109,6 +109,7 @@ async def main() -> int:
     middleware = UserMiddleware(users)
     dp.message.outer_middleware(middleware)
     dp.callback_query.outer_middleware(middleware)
+    dp.inline_query.outer_middleware(middleware)
 
     # Порядок важен: сначала знакомство и меню, диалоги — внутри своих роутеров, заглушки — в самом конце.
     dp.include_router(errors.router)

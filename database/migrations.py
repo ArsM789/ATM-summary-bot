@@ -16,7 +16,7 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-LATEST_VERSION = 4
+LATEST_VERSION = 5
 
 
 async def _columns(conn: aiosqlite.Connection, table: str) -> set[str]:
@@ -189,8 +189,22 @@ async def _migrate_to_4(conn: aiosqlite.Connection) -> None:
     await _add_column(conn, "users", "event_reminders_enabled", "INTEGER NOT NULL DEFAULT 1")
     await _add_column(conn, "users", "default_remind_minutes", "INTEGER NOT NULL DEFAULT 15")
 
+async def _migrate_to_5(conn: aiosqlite.Connection) -> None:
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS banned_users (
+            telegram_id INTEGER PRIMARY KEY,
+            reason TEXT,
+            banned_by INTEGER NOT NULL,
+            banned_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
 
-_MIGRATIONS = {2: _migrate_to_2, 3: _migrate_to_3, 4: _migrate_to_4}
+_MIGRATIONS = {
+    2: _migrate_to_2,
+    3: _migrate_to_3,
+    4: _migrate_to_4,
+    5: _migrate_to_5,
+}
 
 
 def _backup_sync(path: Path, version: int) -> Path:

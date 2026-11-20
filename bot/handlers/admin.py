@@ -228,3 +228,41 @@ async def show_feedback(callback: CallbackQuery, feedback: FeedbackRepository) -
         lines.append(f"{status_icon.get(f.status, '•')} <b>#{f.id}</b> {who}, <code>{f.user_id}</code>\n«{preview}»\n")
     await callback.answer()
     await edit_or_reply(callback, clip("\n".join(lines)), reply_markup=back_keyboard())
+
+
+
+@router.message(Command("ban"))
+async def cmd_ban(message: Message, users: UserRepository) -> None:
+    parts = (message.text or "").split(maxsplit=2)
+
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer("Формат: /ban ID [причина]")
+        return
+
+    user_id = int(parts[1])
+    reason = parts[2] if len(parts) > 2 else None
+
+    await users.ban(user_id, message.from_user.id, reason)
+
+    await message.answer(
+        f"⛔ Пользователь <code>{user_id}</code> заблокирован."
+    )
+
+
+@router.message(Command("unban"))
+async def cmd_unban(message: Message, users: UserRepository) -> None:
+    parts = (message.text or "").split(maxsplit=1)
+
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Формат: /unban ID")
+        return
+
+    user_id = int(parts[1])
+    removed = await users.unban(user_id)
+
+    if removed:
+        await message.answer(
+            f"✅ Пользователь <code>{user_id}</code> разблокирован."
+        )
+    else:
+        await message.answer("Этого пользователя нет в чёрном списке.")

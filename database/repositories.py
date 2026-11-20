@@ -199,6 +199,34 @@ class UserRepository:
     async def set_bot_blocked(self, user_id: int, blocked: bool) -> None:
         await self._db.execute("UPDATE users SET bot_blocked = ? WHERE telegram_id = ?", (int(blocked), user_id))
 
+    async def is_banned(self, user_id: int) -> bool:
+        row = await self._db.fetchone(
+            "SELECT 1 FROM banned_users WHERE telegram_id = ?",
+            (user_id,),
+        )
+        return row is not None
+
+    async def ban(self, user_id: int, admin_id: int, reason: str | None = None) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO banned_users (telegram_id, reason, banned_by)
+            VALUES (?, ?, ?) ON CONFLICT(telegram_id) DO
+            UPDATE SET
+                reason = excluded.reason,
+                banned_by = excluded.banned_by,
+                banned_at = datetime('now')
+            """,
+            (user_id, reason, admin_id),
+        )
+
+    async def unban(self, user_id: int) -> bool:
+        deleted = await self._db.execute(
+            "DELETE FROM banned_users WHERE telegram_id = ?",
+            (user_id,),
+        )
+        return deleted > 0
+
+
     # --- для админ-панели ---
 
     async def stats(self) -> dict[str, int]:
