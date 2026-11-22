@@ -115,3 +115,10 @@ def fmt_span(low: float, high: float) -> str:
     if round_half_up(low) == round_half_up(high):
         return f"{fmt_temp(high, '')} °C"
     return f"{fmt_temp(low, '')}…{fmt_temp(high, '')} °C"
+
+
+MAX_TEXT = 3900  # запас до лимита Telegram в 4096 символов
+
+
+def clip(text: str, limit: int = MAX_TEXT) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"

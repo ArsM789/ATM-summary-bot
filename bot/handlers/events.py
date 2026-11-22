@@ -18,13 +18,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot.filters import TEXT_INPUT
-from bot.helpers import clip, edit_or_reply
+from bot.helpers import edit_or_reply, reply
 from bot.keyboards.events_menu import (
     PAGE_SIZE, card_keyboard, cancel_keyboard, date_keyboard, default_remind_keyboard, delete_confirm_keyboard,
     duration_keyboard, edit_fields_keyboard, event_settings_keyboard, events_menu_keyboard, list_keyboard,
     month_day_keyboard, preview_keyboard, remind_keyboard, repeat_keyboard, weekdays_keyboard,
 )
-from bot.keyboards.main_menu import BTN_EVENTS, main_menu
+from bot.keyboards.main_menu import BTN_EVENTS
+from bot.ui import ui
 from bot.states.settings_states import EventForm
 from config import Settings
 from database.models import User, UserEvent
@@ -36,6 +37,7 @@ from services.event_schedule import (
     end_datetime, end_time_text, next_occurrence, rule_from_event, rule_from_fields, start_datetime,
 )
 from services.event_text import card_text, fields_from_event, format_remind, preview_text
+from services.quick_event import apply_quick_to_draft, parse_quick_event
 from services.time_service import now_in
 from utils.formatting import esc
 from utils.helpers import InFlightGuard
@@ -54,11 +56,8 @@ EDIT_CHAINS = {
 # ----------------------------------------------------------------- общие помощники
 
 async def _say(event: Message | CallbackQuery, text: str, kb=None) -> None:
-    """Сообщение пользователя -> новое сообщение; нажатие кнопки -> правим то же сообщение."""
-    if isinstance(event, Message):
-        await event.answer(clip(text), reply_markup=kb)
-    else:
-        await edit_or_reply(event, text, reply_markup=kb)
+    """Всегда правим живой экран: нажатие кнопки — то же сообщение; ввод текста — удаляем ввод и обновляем экран."""
+    await reply(event, text, reply_markup=kb)
 
 
 def _now(user: User) -> datetime:
@@ -85,12 +84,17 @@ async def _menu_text(user: User, user_events: UserEventRepository, settings: Set
 
 # ----------------------------------------------------------------- меню
 
+async def show_events_menu(event: Message | CallbackQuery, user: User, user_events: UserEventRepository,
+                           settings: Settings, *, fresh: bool = False) -> None:
+    await reply(event, await _menu_text(user, user_events, settings), reply_markup=events_menu_keyboard(), fresh=fresh)
+
+
 @router.message(F.text == BTN_EVENTS)
 @router.message(Command("events"))
 async def open_events(message: Message, user: User, state: FSMContext, user_events: UserEventRepository,
                       settings: Settings) -> None:
     await state.clear()
-    await message.answer(await _menu_text(user, user_events, settings), reply_markup=events_menu_keyboard())
+    await show_events_menu(message, user, user_events, settings, fresh=True)
 
 
 @router.callback_query(F.data == "ev:menu")
@@ -99,14 +103,6 @@ async def back_to_menu(callback: CallbackQuery, user: User, state: FSMContext, u
     await state.clear()
     await callback.answer()
     await edit_or_reply(callback, await _menu_text(user, user_events, settings), reply_markup=events_menu_keyboard())
-
-
-@router.callback_query(F.data == "ev:exit")
-async def exit_to_main(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
-    await callback.answer()
-    await edit_or_reply(callback, "📅 Мои события — закрыто.")
-    await callback.bot.send_message(callback.from_user.id, "Главное меню 👇", reply_markup=main_menu())
 
 
 # ----------------------------------------------------------------- список и карточка
@@ -287,48 +283,57 @@ async def _set_draft(state: FSMContext, **changes) -> dict:
     return draft
 
 
-async def _goto(event: Message | CallbackQuery, state: FSMContext, user: User, step: str) -> None:
+def _n(notice: str) -> str:
+    return f"⚠️ {esc(notice)}\n\n" if notice else ""
+
+
+async def _goto(event: Message | CallbackQuery, state: FSMContext, user: User, step: str, notice: str = "") -> None:
+    """Показывает экран шага. notice — сообщение об ошибке ввода: показывается в этом же экране (кнопки остаются)."""
     data = await state.get_data()
     draft = data.get("draft") or {}
     editing = data.get("edit_id") is not None
 
     if step == "title":
         await state.set_state(EventForm.title)
-        await _say(event, ("✏️ Как теперь назвать событие?" if editing else
+        await _say(event, _n(notice) + ("✏️ Как теперь назвать событие?" if editing else
                            "📅 <b>Новое событие</b>\n\nКак назвать? Например: <i>Урок английского</i>"),
                    cancel_keyboard())
     elif step == "repeat":
         await state.set_state(EventForm.repeat)
-        await _say(event, "Как часто повторяется?", repeat_keyboard())
+        await _say(event, _n(notice) + "Как часто повторяется?", repeat_keyboard())
     elif step == "when":
         recurrence = draft.get("recurrence")
         if recurrence == "daily":
             await _advance(event, state, user)
         elif recurrence == "weekly":
             await state.set_state(EventForm.weekdays)
-            await _say(event, "В какие дни недели? Можно выбрать несколько.", weekdays_keyboard(draft.get("weekdays_mask", 0)))
+            await _say(event, _n(notice) + "В какие дни недели? Можно выбрать несколько.", weekdays_keyboard(draft.get("weekdays_mask", 0)))
         elif recurrence == "monthly":
             await state.set_state(EventForm.month_day)
-            await _say(event, "Какого числа каждого месяца?\nВыбери кнопкой или напиши число (1–31).\n"
+            await _say(event, _n(notice) + "Какого числа каждого месяца?\nВыбери кнопкой или напиши число (1–31).\n"
                               "<i>Если в месяце нет такого числа — событие будет в его последний день.</i>",
                        month_day_keyboard())
         else:
             await state.set_state(EventForm.date)
-            await _say(event, "Какого числа? Выбери кнопкой или напиши: <i>15.11</i>, <i>15 ноября</i>, "
+            await _say(event, _n(notice) + "Какого числа? Выбери кнопкой или напиши: <i>15.11</i>, <i>15 ноября</i>, "
                               "<i>в пятницу</i>.", date_keyboard())
     elif step == "time":
         await state.set_state(EventForm.time)
-        await _say(event, "Во сколько начало? Напиши время, например <i>16:00</i>.", cancel_keyboard())
+        await _say(event, _n(notice) + "Во сколько начало? Напиши время, например <i>16:00</i>.", cancel_keyboard())
     elif step == "duration":
         await state.set_state(EventForm.duration)
-        await _say(event, "Сколько длится? Выбери или напиши: <i>2 часа</i>, <i>90 минут</i>, <i>1:30</i>.",
+        await _say(event, _n(notice) + "Сколько длится? Выбери или напиши: <i>2 часа</i>, <i>90 минут</i>, <i>1:30</i>.",
                    duration_keyboard())
+    elif step == "remind_custom":
+        await state.set_state(EventForm.remind_custom)
+        await _say(event, _n(notice) + "За сколько минут напомнить? Напиши число, например <i>45</i> (или <i>1 час</i>).",
+                   cancel_keyboard())
     elif step == "remind":
         await state.set_state(EventForm.remind)
-        await _say(event, "За сколько напомнить о начале?", remind_keyboard(draft.get("remind_before_min")))
+        await _say(event, _n(notice) + "За сколько напомнить о начале?", remind_keyboard(draft.get("remind_before_min")))
     else:  # preview
         await state.set_state(EventForm.preview)
-        await _say(event, preview_text(draft, _now(user).date(), editing=editing), preview_keyboard())
+        await _say(event, _n(notice) + preview_text(draft, _now(user).date(), editing=editing), preview_keyboard())
 
 
 async def _advance(event: Message | CallbackQuery, state: FSMContext, user: User) -> None:
@@ -377,9 +382,18 @@ async def cancel_form(callback: CallbackQuery, user: User, state: FSMContext, us
 
 @router.message(StateFilter(EventForm.title), TEXT_INPUT)
 async def got_title(message: Message, user: User, state: FSMContext) -> None:
+    quick = parse_quick_event(message.text or "", _now(user).date())
+    data = await state.get_data()
+    if quick.found_anything and data.get("edit_id") is None and quick.title:
+        # Естественный ввод: «урок английского по вторникам в 16:00 на 2 часа» — подставляем найденное,
+        # спрашиваем только недостающее; всё видно в предпросмотре перед сохранением.
+        draft, chain = apply_quick_to_draft(await _draft(state), quick, _now(user).date())
+        await state.update_data(draft=draft, chain=chain)
+        await _advance(message, state, user)
+        return
     title, error = parse_title(message.text or "")
     if error:
-        await message.answer(esc(error), reply_markup=cancel_keyboard())
+        await _goto(message, state, user, "title", notice=error)
         return
     await _set_draft(state, title=title)
     await _advance(message, state, user)
@@ -436,7 +450,7 @@ async def pick_date_button(callback: CallbackQuery, user: User, state: FSMContex
 async def got_date(message: Message, user: User, state: FSMContext) -> None:
     value, error = parse_date_input(message.text or "", _now(user).date())
     if error:
-        await message.answer(esc(error), reply_markup=date_keyboard())
+        await _goto(message, state, user, "when", notice=error)
         return
     await _set_draft(state, event_date=value.isoformat())
     await _advance(message, state, user)
@@ -454,7 +468,7 @@ async def pick_month_day_button(callback: CallbackQuery, user: User, state: FSMC
 async def got_month_day(message: Message, user: User, state: FSMContext) -> None:
     value, error = parse_month_day(message.text or "")
     if error:
-        await message.answer(esc(error), reply_markup=month_day_keyboard())
+        await _goto(message, state, user, "when", notice=error)
         return
     await _set_draft(state, month_day=value)
     await _advance(message, state, user)
@@ -464,8 +478,7 @@ async def got_month_day(message: Message, user: User, state: FSMContext) -> None
 async def got_time(message: Message, user: User, state: FSMContext) -> None:
     value = parse_time_input(message.text or "")
     if value is None:
-        await message.answer("Не похоже на время. Напиши в формате <b>ЧЧ:ММ</b>, например <i>16:00</i>.",
-                             reply_markup=cancel_keyboard())
+        await _goto(message, state, user, "time", notice="Не похоже на время. Напиши в формате ЧЧ:ММ, например 16:00.")
         return
     await _set_draft(state, start_time=value)
     await _advance(message, state, user)
@@ -482,7 +495,7 @@ async def pick_duration_button(callback: CallbackQuery, user: User, state: FSMCo
 async def got_duration(message: Message, user: User, state: FSMContext) -> None:
     minutes, error = parse_duration(message.text or "")
     if error:
-        await message.answer(esc(error), reply_markup=duration_keyboard())
+        await _goto(message, state, user, "duration", notice=error)
         return
     await _set_draft(state, duration_min=minutes)
     await _advance(message, state, user)
@@ -496,33 +509,44 @@ async def pick_remind_button(callback: CallbackQuery, user: User, state: FSMCont
 
 
 @router.callback_query(StateFilter(EventForm.remind), F.data == "ef:remc")
-async def ask_custom_remind(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(EventForm.remind_custom)
+async def ask_custom_remind(callback: CallbackQuery, user: User, state: FSMContext) -> None:
     await callback.answer()
-    await edit_or_reply(callback, "За сколько минут напомнить? Напиши число, например <i>45</i> (или <i>1 час</i>).",
-                        reply_markup=cancel_keyboard())
+    await _goto(callback, state, user, "remind_custom")
 
 
 @router.message(StateFilter(EventForm.remind_custom), TEXT_INPUT)
 async def got_custom_remind(message: Message, user: User, state: FSMContext) -> None:
     minutes, error = parse_remind_minutes(message.text or "")
     if error:
-        await message.answer(esc(error), reply_markup=cancel_keyboard())
+        await _goto(message, state, user, "remind_custom", notice=error)
         return
     await _set_draft(state, remind_before_min=minutes)
     await _advance(message, state, user)
 
 
-# нажатия кнопок, когда ждём текст, и текст, когда ждём кнопку
+_STEP_OF_STATE = {
+    EventForm.repeat.state: "repeat", EventForm.weekdays.state: "when", EventForm.remind.state: "remind",
+    EventForm.preview.state: "preview", EventForm.title.state: "title", EventForm.date.state: "when",
+    EventForm.month_day.state: "when", EventForm.time.state: "time", EventForm.duration.state: "duration",
+    EventForm.remind_custom.state: "remind_custom",
+}
+
+
+async def _reshow_current_step(message: Message, state: FSMContext, user: User, notice: str) -> None:
+    step = _STEP_OF_STATE.get(await state.get_state() or "", "preview")
+    await _goto(message, state, user, step, notice=notice)
+
+
+# сообщение не по теме шага: остаёмся на шаге, подсказка — внутри экрана (и сообщение пользователя удаляется)
 @router.message(StateFilter(EventForm.repeat, EventForm.weekdays, EventForm.remind, EventForm.preview), (~F.text) | TEXT_INPUT)
-async def buttons_only_hint(message: Message) -> None:
-    await message.answer("Выбери вариант кнопкой под сообщением 👆")
+async def buttons_only_hint(message: Message, user: User, state: FSMContext) -> None:
+    await _reshow_current_step(message, state, user, "Выбери вариант кнопкой под сообщением.")
 
 
 @router.message(StateFilter(EventForm.title, EventForm.date, EventForm.month_day, EventForm.time,
                             EventForm.duration, EventForm.remind_custom), ~F.text)
-async def text_only_hint(message: Message) -> None:
-    await message.answer("Пока принимаю только текст. Напиши ответ словами.")
+async def text_only_hint(message: Message, user: User, state: FSMContext) -> None:
+    await _reshow_current_step(message, state, user, "Пока принимаю только текст. Напиши ответ словами.")
 
 
 # ----------------------------------------------------------------- диалог: предпросмотр, правка, сохранение
@@ -622,3 +646,26 @@ async def save_event(callback: CallbackQuery, user: User, state: FSMContext, use
         await edit_or_reply(callback, notice + ("\n" + note if note else "") + "\n\n" + (text or ""), reply_markup=kb)
     finally:
         guard.release(user.telegram_id, "event-save")
+
+
+async def begin_quick_event(event: Message | CallbackQuery, user: User, state: FSMContext,
+                            user_events: UserEventRepository, settings: Settings, text: str = "") -> None:
+    """Старт создания события из свободной фразы («добавь урок английского завтра в 16:00»).
+    Найденное подставляется в черновик, спрашивается только недостающее; без деталей — обычный диалог."""
+    active = await user_events.count_active(user.telegram_id)
+    if active >= settings.max_user_events:
+        await state.clear()
+        await reply(event, _limit_text(active, settings.max_user_events), reply_markup=events_menu_keyboard(),
+                    fresh=isinstance(event, Message))
+        return
+    await state.clear()
+    quick = parse_quick_event(text, _now(user).date())
+    draft, chain = _new_draft(user), list(FULL_CHAIN)
+    if quick.found_anything or quick.title:
+        draft, chain = apply_quick_to_draft(draft, quick, _now(user).date())
+    await state.update_data(draft=draft, chain=chain, edit_id=None)
+    if isinstance(event, Message):
+        await ui.delete(event.bot, event.chat.id, event.message_id)   # исходная фраза пользователя больше не нужна
+        await ui.retire(event.bot, event.chat.id, ui.anchor_of(user.telegram_id))   # прошлый экран с кнопками убираем
+        ui.forget(user.telegram_id)                                                  # экран диалога создаём заново внизу чата
+    await _advance(event, state, user)

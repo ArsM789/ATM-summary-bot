@@ -4,6 +4,7 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardMarkup
 
 from bot.keyboards.common import button, markup
+from bot.keyboards.nav import nav_row
 from database.models import UserEvent
 from services.event_text import fields_from_event, format_remind, short_label
 from services.time_service import WEEKDAYS_SHORT
@@ -17,7 +18,7 @@ def events_menu_keyboard() -> InlineKeyboardMarkup:
         [button("➕ Добавить событие", "ev:add", style="primary")],
         [button("📋 Мои события", "ev:list:0")],
         [button("⚙️ Настройки уведомлений", "ev:set")],
-        [button("‹ В главное меню", "ev:exit")],
+        nav_row(),
     )
 
 
@@ -36,7 +37,8 @@ def list_keyboard(events: list[UserEvent], page: int) -> InlineKeyboardMarkup:
         if page + 1 < pages:
             nav.append(button("›", f"ev:list:{page + 1}"))
         rows.append(nav)
-    rows.append([button("➕ Добавить", "ev:add"), button("‹ Назад", "ev:menu")])
+    rows.append([button("➕ Добавить", "ev:add")])
+    rows.append(nav_row("ev:menu"))
     return markup(*rows)
 
 
@@ -46,7 +48,7 @@ def card_keyboard(event: UserEvent, page: int) -> InlineKeyboardMarkup:
     return markup(
         [toggle, button("✏️ Изменить", f"ev:edit:{event.id}")],
         [button("🗑 Удалить", f"ev:del:{event.id}", style="danger")],
-        [button("‹ К списку", f"ev:list:{page}")],
+        nav_row(f"ev:list:{page}"),
     )
 
 
@@ -128,7 +130,7 @@ def event_settings_keyboard(enabled: bool) -> InlineKeyboardMarkup:
     return markup(
         [button(toggle, "es:tog")],
         [button("⏱ Время по умолчанию", "es:def")],
-        [button("‹ Назад", "ev:menu")],
+        nav_row("ev:menu"),
     )
 
 

@@ -53,20 +53,21 @@ async def _settings_text(user: User, schedules: ScheduleRepository) -> str:
     )
 
 
-async def show_settings(event: Message | CallbackQuery, user: User, schedules: ScheduleRepository, *, edit: bool = False) -> None:
+async def show_settings(event: Message | CallbackQuery, user: User, schedules: ScheduleRepository, *,
+                        edit: bool = False, fresh: bool = False, notice: str = "") -> None:
+    """Экран настроек. notice — короткая строка-результат сверху («✅ Город: …»): результат действия показывается в
+    самом экране, а не отдельным сообщением. (edit оставлен для совместимости: редактирование определяется типом события.)"""
     text = await _settings_text(user, schedules)
-    markup = settings_keyboard(user.notifications_enabled)
-    if edit and isinstance(event, CallbackQuery):
-        await edit_or_reply(event, text, reply_markup=markup)
-    else:
-        await reply(event, text, reply_markup=markup)
+    if notice:
+        text = f"{notice}\n\n{text}"
+    await reply(event, text, reply_markup=settings_keyboard(user.notifications_enabled), fresh=fresh)
 
 
 @router.message(F.text == BTN_SETTINGS)
 @router.message(Command("settings"))
 async def open_settings(message: Message, user: User, schedules: ScheduleRepository, state: FSMContext) -> None:
     await state.clear()
-    await show_settings(message, user, schedules)
+    await show_settings(message, user, schedules, fresh=True)
 
 
 @router.callback_query(F.data == "st:home")
@@ -105,8 +106,9 @@ async def test_summary(callback: CallbackQuery, user: User, summaries: SummarySe
         await callback.answer("Готовлю тестовую сводку…")
         await bot.send_chat_action(user.telegram_id, ChatAction.TYPING)
         result = await summaries.build(user)
-        await bot.send_message(user.telegram_id, "🧪 <i>Тестовая сводка — так будут выглядеть автоматические:</i>")
-        await bot.send_message(user.telegram_id, result.text, reply_markup=summary_keyboard())
+        # Одно сообщение (а не два): пометка «тест» — первой строкой; экран настроек остаётся на месте.
+        await bot.send_message(user.telegram_id, "🧪 <i>Тестовая сводка — так выглядят автоматические</i>\n\n" + result.text,
+                               reply_markup=summary_keyboard())
     finally:
         guard.release(user.telegram_id, "summary")
 
@@ -128,18 +130,18 @@ async def got_city(message: Message, state: FSMContext, weather: WeatherService)
     try:
         places = await weather.search_city(query, count=5)
     except CityNotFoundError:
-        await message.answer(
+        await reply(message,
             "Не нашёл такой город. Проверь написание или добавь страну: <i>Казань, Россия</i>.",
             reply_markup=cancel_keyboard())
         return
     except WeatherUnavailableError:
-        await message.answer("Сервис поиска городов сейчас недоступен. Попробуй через минуту.",
+        await reply(message, "Сервис поиска городов сейчас недоступен. Попробуй через минуту.",
                              reply_markup=cancel_keyboard())
         return
     await state.update_data(cities=[
         {"name": p.name, "lat": p.latitude, "lon": p.longitude, "tz": p.timezone} for p in places
     ])
-    await message.answer("Выбери подходящий вариант:", reply_markup=cities_keyboard([p.label for p in places]))
+    await reply(message, "Выбери подходящий вариант:", reply_markup=cities_keyboard([p.label for p in places]))
 
 
 @router.callback_query(StateFilter(CityInput.query), F.data.regexp(r"^ct:\d$"))
@@ -177,8 +179,8 @@ async def pick_city(callback: CallbackQuery, user: User, state: FSMContext, user
         check = "\n<i>Прогноз для этой точки сейчас получить не удалось — город сохранён, проверю при следующей сводке.</i>"
 
     fresh = await users.get(user.telegram_id)
-    await reply(callback, f"✅ Город: <b>{esc(place['name'])}</b>.{check}{note}")
-    await show_settings(callback, fresh or user, schedules)
+    await show_settings(callback, fresh or user, schedules,
+                        notice=f"✅ Город: <b>{esc(place['name'])}</b>.{check}{note}")
 
 
 # ----------------------------------------------------------------- часовой пояс
@@ -201,7 +203,7 @@ async def got_timezone(message: Message, user: User, state: FSMContext, users: U
                        schedules: ScheduleRepository) -> None:
     tz = parse_timezone(message.text or "")
     if tz is None:
-        await message.answer(
+        await reply(message,
             "Не получилось распознать часовой пояс. Примеры: <code>Europe/Moscow</code>, <code>+3</code>, <code>МСК</code>.",
             reply_markup=cancel_keyboard(),
         )
@@ -209,5 +211,5 @@ async def got_timezone(message: Message, user: User, state: FSMContext, users: U
     await users.update_timezone(user.telegram_id, tz)
     await state.clear()
     fresh = await users.get(user.telegram_id)
-    await message.answer(f"✅ Часовой пояс: <b>{esc(tz)}</b>. Сейчас у тебя {now_in(tz).strftime('%H:%M')}.")
-    await show_settings(message, fresh or user, schedules)
+    await show_settings(message, fresh or user, schedules,
+                        notice=f"✅ Часовой пояс: <b>{esc(tz)}</b>. Сейчас у тебя {now_in(tz).strftime('%H:%M')}.")

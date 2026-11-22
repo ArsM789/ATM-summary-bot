@@ -316,7 +316,7 @@ class MultiUserDeliveryTests(DeliveryCase):
         self.assertEqual(bot.sent, [])
         self.assertEqual((await d.run_once(t0 + timedelta(minutes=8)))[Outcome.SENT], 1)   # 3-я попытка: без погоды
         text = bot.sent[0][1]
-        self.assertIn("Погоду сейчас получить не удалось", text)
+        self.assertIn("Погода сейчас недоступна", text)
         self.assertIn("Алгебра", text)                                           # расписание — настоящее, погода не выдумана
         self.assertNotIn("°", text)
 

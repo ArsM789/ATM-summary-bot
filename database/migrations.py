@@ -16,7 +16,8 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-LATEST_VERSION = 5
+LATEST_VERSION = 8
+EVENING_TIME = "18:00"  # вечерняя сводка (на завтра) по умолчанию
 
 
 async def _columns(conn: aiosqlite.Connection, table: str) -> set[str]:
@@ -189,22 +190,48 @@ async def _migrate_to_4(conn: aiosqlite.Connection) -> None:
     await _add_column(conn, "users", "event_reminders_enabled", "INTEGER NOT NULL DEFAULT 1")
     await _add_column(conn, "users", "default_remind_minutes", "INTEGER NOT NULL DEFAULT 15")
 
+
 async def _migrate_to_5(conn: aiosqlite.Connection) -> None:
-    await conn.execute("""
+    """Рассылки с форматированием и картинкой + вечерняя сводка в 18:00 для всех пользователей."""
+    await _add_column(conn, "broadcasts", "photo_file_id", "TEXT")                      # необязательная картинка
+    await _add_column(conn, "broadcasts", "photo_unique_id", "TEXT")                    # стабильный id картинки (для отпечатка)
+    await _add_column(conn, "broadcasts", "kind", "TEXT NOT NULL DEFAULT 'custom'")      # custom | downtime
+    await _add_column(conn, "broadcasts", "content_hash", "TEXT")                        # защита от повторной отправки
+    await _add_column(conn, "broadcasts", "started_ts", "INTEGER")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_hash ON broadcasts(content_hash, status)")
+    # Вечерняя сводка — это обычная запись расписания автосводок (время по часам пользователя): тот же планировщик,
+    # журнал и настройки «вкл/выкл». Добавляем 18:00, если такого времени ещё нет (UNIQUE(user_id, send_time)).
+    await conn.execute(
+        "INSERT OR IGNORE INTO schedules (user_id, send_time, enabled, weekdays_mask, effective_from) "
+        "SELECT telegram_id, ?, 1, 127, CAST(strftime('%s', 'now') AS INTEGER) FROM users",
+        (EVENING_TIME,),
+    )
+
+async def _migrate_to_6(conn: aiosqlite.Connection) -> None:
+    """Административная блокировка пользователей."""
+    await conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS banned_users (
             telegram_id INTEGER PRIMARY KEY,
             reason TEXT,
             banned_by INTEGER NOT NULL,
             banned_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
-    """)
+        """
+    )
 
-_MIGRATIONS = {
-    2: _migrate_to_2,
-    3: _migrate_to_3,
-    4: _migrate_to_4,
-    5: _migrate_to_5,
-}
+async def _migrate_to_8(conn: aiosqlite.Connection) -> None:
+    """Добавляем недостающие поля рассылок."""
+    await _add_column(conn, "broadcasts", "kind", "TEXT NOT NULL DEFAULT 'custom'")
+    await _add_column(conn, "broadcasts", "content_hash", "TEXT")
+    await _add_column(conn, "broadcasts", "started_ts", "INTEGER")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_broadcasts_hash "
+        "ON broadcasts(content_hash, status)"
+    )
+
+
+_MIGRATIONS = {2: _migrate_to_2, 3: _migrate_to_3, 4: _migrate_to_4, 5: _migrate_to_5, 6: _migrate_to_6, 8: _migrate_to_8}
 
 
 def _backup_sync(path: Path, version: int) -> Path:

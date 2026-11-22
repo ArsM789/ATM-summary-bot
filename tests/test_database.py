@@ -23,7 +23,7 @@ from database.schema import SCHEMA
 def make_settings(tmp: Path) -> Settings:
     return Settings(
         bot_token="1:x", bot_name="T", default_city="Казань", default_latitude=55.79, default_longitude=49.12,
-        default_timezone="Europe/Moscow", default_send_time="07:00", admin_id=1, broadcast_rate=15.0, max_user_events=10,
+        default_timezone="Europe/Moscow", default_send_time="07:00", default_evening_time="18:00", admin_id=1, broadcast_rate=15.0, max_user_events=10,
         database_path=tmp / "t.db", weather_cache_ttl=0, weather_timeout=5, weather_retries=0,
         log_level="INFO", custom_emoji={},
     )
@@ -129,10 +129,10 @@ class UserAndNameRepoTests(DbCase):
         u = await self.users.get_or_create(1, "Арсений", "arsen")
         self.assertEqual((u.name, u.city, u.timezone, u.username, u.name_confirmed), ("Арсений", "Казань", "Europe/Moscow", "arsen", False))
         sch = await self.schedules.list_for_user(1)
-        self.assertEqual([(e.send_time, e.enabled) for e in sch], [("07:00", True)])
+        self.assertEqual([(e.send_time, e.enabled) for e in sch], [("07:00", True), ("18:00", True)])   # утро + вечер (на завтра)
         self.assertEqual(await self.weekly.get_week(1), {})  # выдуманных уроков нет
         again = await self.users.get_or_create(1, "Арсений", "arsen")
-        self.assertEqual(len(await self.schedules.list_for_user(1)), 1)  # повторный вызов не дублирует
+        self.assertEqual(len(await self.schedules.list_for_user(1)), 2)  # повторный вызов не дублирует (утро + вечер)
         self.assertEqual(again.telegram_id, 1)
 
     async def test_names_roundtrip_and_blocked_reset(self):
@@ -232,7 +232,7 @@ class ScheduleRepoTests(DbCase):
         await self.schedules.add(2, "13:30")  # у другого пользователя то же время — можно
         with self.assertRaises(DuplicateTimeError):
             await self.schedules.update_time(1, e.id, "07:00")
-        for i in range(8):  # уже есть 07:00 и 13:30 -> ещё 8 = лимит 10
+        for i in range(7):  # уже есть 07:00, 18:00 и 13:30 -> ещё 7 = лимит 10
             await self.schedules.add(1, f"1{i}:15")
         with self.assertRaises(ScheduleLimitError):
             await self.schedules.add(1, "23:59")
@@ -248,10 +248,10 @@ class ScheduleRepoTests(DbCase):
             await self.users.get_or_create(uid, f"U{uid}", None)
         await self.users.set_notifications_enabled(2, False)
         await self.users.set_bot_blocked(3, True)
-        e4 = (await self.schedules.list_for_user(4))[0]
-        await self.schedules.set_enabled(4, e4.id, False)
+        for e4 in await self.schedules.list_for_user(4):      # у пользователя 4 отключены оба времени
+            await self.schedules.set_enabled(4, e4.id, False)
         active = await self.schedules.list_all_active()
-        self.assertEqual([(s.user_id, u.telegram_id) for s, u in active], [(1, 1)])
+        self.assertEqual(sorted((s.user_id, s.send_time) for s, u in active), [(1, "07:00"), (1, "18:00")])
 
 
 class NotificationLogTests(DbCase):

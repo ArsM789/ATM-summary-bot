@@ -1,38 +1,21 @@
-"""Мелкие помощники хендлеров."""
+"""Мелкие помощники хендлеров. Все «ответы пользователю» идут через bot/ui.py: редактирование живого экрана
+вместо новых сообщений, удаление ввода пользователя, чистка устаревших кнопок."""
 from __future__ import annotations
 
-import logging
 from typing import Any
 
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 
-logger = logging.getLogger(__name__)
-
-MAX_TEXT = 3900  # запас до лимита Telegram в 4096 символов
-
-
-def clip(text: str, limit: int = MAX_TEXT) -> str:
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+from bot.ui import ui
+from utils.formatting import MAX_TEXT, clip  # noqa: F401  (реэкспорт для обратной совместимости)
 
 
-async def reply(event: Message | CallbackQuery, text: str, **kwargs: Any) -> None:
-    """Новое сообщение в личный чат того, кто совершил действие (и для сообщения, и для кнопки)."""
-    if isinstance(event, Message):
-        await event.answer(clip(text), **kwargs)
-    else:
-        await event.bot.send_message(event.from_user.id, clip(text), **kwargs)
+async def reply(event: Message | CallbackQuery, text: str, *, reply_markup: Any = None, fresh: bool = False) -> None:
+    """Показывает экран: нажатие кнопки -> правим то же сообщение; ввод текста -> правим экран и удаляем ввод;
+    fresh=True (вход из меню/команды) -> убираем прошлый экран и присылаем новый внизу чата."""
+    await ui.show(event, text, reply_markup, fresh=fresh)
 
 
-async def edit_or_reply(event: CallbackQuery, text: str, **kwargs: Any) -> None:
-    """Редактирует сообщение с кнопкой; если нельзя (старое/недоступное) — присылает новое."""
-    message = event.message
-    if isinstance(message, Message):
-        try:
-            await message.edit_text(clip(text), **kwargs)
-            return
-        except TelegramBadRequest as exc:
-            if "message is not modified" in str(exc):
-                return
-            logger.debug("edit_text не удался (%s), отправляю новое сообщение", exc)
-    await event.bot.send_message(event.from_user.id, clip(text), **kwargs)
+async def edit_or_reply(event: CallbackQuery | Message, text: str, *, reply_markup: Any = None) -> None:
+    """Совместимость: то же, что reply, для обработчиков кнопок."""
+    await ui.show(event, text, reply_markup)

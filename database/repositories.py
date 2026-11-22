@@ -90,6 +90,33 @@ class UserRepository:
         row = await self._db.fetchone("SELECT * FROM users WHERE telegram_id = ?", (user_id,))
         return _user(row) if row else None
 
+    async def is_banned(self, user_id: int) -> bool:
+        row = await self._db.fetchone(
+            "SELECT 1 FROM banned_users WHERE telegram_id = ?",
+            (user_id,),
+        )
+        return row is not None
+
+    async def ban(self, user_id: int, admin_id: int, reason: str | None = None) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO banned_users (telegram_id, reason, banned_by)
+            VALUES (?, ?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                reason = excluded.reason,
+                banned_by = excluded.banned_by,
+                banned_at = datetime('now')
+            """,
+            (user_id, reason, admin_id),
+        )
+
+    async def unban(self, user_id: int) -> bool:
+        changed = await self._db.execute(
+            "DELETE FROM banned_users WHERE telegram_id = ?",
+            (user_id,),
+        )
+        return changed > 0
+
     async def get_or_create(self, user_id: int, tg_first_name: str | None, username: str | None = None) -> User:
         """Находит пользователя или создаёт. Каждое обращение пользователя к боту обновляет его
         username/first_name и снимает отметку «заблокировал бота» (он явно снова пишет боту)."""
@@ -121,10 +148,11 @@ class UserRepository:
             )
             if cursor.rowcount == 1:  # новый пользователь (а не гонка двух запросов)
                 is_new = True
-                await conn.execute(
+                await conn.executemany(
                     "INSERT OR IGNORE INTO schedules (user_id, send_time, enabled, weekdays_mask, effective_from) "
                     "VALUES (?, ?, 1, ?, ?)",
-                    (user_id, s.default_send_time, ALL_WEEKDAYS_MASK, int(time.time())),
+                    [(user_id, send_time, ALL_WEEKDAYS_MASK, int(time.time()))
+                     for send_time in (s.default_send_time, s.default_evening_time)],  # утро и вечер (на завтра)
                 )
                 logger.info("Новый пользователь: %s", user_id)
         created = await self.get(user_id)
@@ -199,34 +227,6 @@ class UserRepository:
     async def set_bot_blocked(self, user_id: int, blocked: bool) -> None:
         await self._db.execute("UPDATE users SET bot_blocked = ? WHERE telegram_id = ?", (int(blocked), user_id))
 
-    async def is_banned(self, user_id: int) -> bool:
-        row = await self._db.fetchone(
-            "SELECT 1 FROM banned_users WHERE telegram_id = ?",
-            (user_id,),
-        )
-        return row is not None
-
-    async def ban(self, user_id: int, admin_id: int, reason: str | None = None) -> None:
-        await self._db.execute(
-            """
-            INSERT INTO banned_users (telegram_id, reason, banned_by)
-            VALUES (?, ?, ?) ON CONFLICT(telegram_id) DO
-            UPDATE SET
-                reason = excluded.reason,
-                banned_by = excluded.banned_by,
-                banned_at = datetime('now')
-            """,
-            (user_id, reason, admin_id),
-        )
-
-    async def unban(self, user_id: int) -> bool:
-        deleted = await self._db.execute(
-            "DELETE FROM banned_users WHERE telegram_id = ?",
-            (user_id,),
-        )
-        return deleted > 0
-
-
     # --- для админ-панели ---
 
     async def stats(self) -> dict[str, int]:
@@ -245,7 +245,7 @@ class UserRepository:
     async def list_broadcast_targets(self, exclude_id: int | None) -> list[tuple[int, bool]]:
         """(user_id, bot_blocked) всех пользователей, кроме exclude_id."""
         rows = await self._db.fetchall(
-            "SELECT telegram_id, bot_blocked FROM users WHERE telegram_id <> ? ORDER BY telegram_id",
+            "SELECT u.telegram_id, u.bot_blocked FROM users u WHERE u.telegram_id <> ? AND NOT EXISTS ( SELECT 1 FROM banned_users b WHERE b.telegram_id = u.telegram_id ) ORDER BY u.telegram_id",
             (exclude_id if exclude_id is not None else -1,),
         )
         return [(r["telegram_id"], bool(r["bot_blocked"])) for r in rows]
@@ -387,7 +387,7 @@ class ScheduleRepository:
         rows = await self._db.fetchall(
             "SELECT s.id AS s_id, s.user_id, s.send_time, s.enabled, s.weekdays_mask, s.effective_from, u.* "
             "FROM schedules s JOIN users u ON u.telegram_id = s.user_id "
-            "WHERE s.enabled = 1 AND u.notifications_enabled = 1 AND u.bot_blocked = 0"
+            "WHERE s.enabled = 1 AND u.notifications_enabled = 1 AND u.bot_blocked = 0 AND NOT EXISTS (SELECT 1 FROM banned_users b WHERE b.telegram_id = u.telegram_id)"
         )
         return [(_schedule(r, prefix="s_"), _user(r)) for r in rows]
 
@@ -506,6 +506,8 @@ def _broadcast(row: aiosqlite.Row) -> Broadcast:
         id=row["id"], admin_id=row["admin_id"], message=row["message"], status=row["status"],
         total_count=row["total_count"], success_count=row["success_count"],
         failed_count=row["failed_count"], blocked_count=row["blocked_count"],
+        photo_file_id=row["photo_file_id"], photo_unique_id=row["photo_unique_id"], kind=row["kind"],
+        content_hash=row["content_hash"],
     )
 
 
@@ -513,12 +515,46 @@ class BroadcastRepository:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    async def create_draft(self, admin_id: int, message: str) -> int:
+    async def create_draft(self, admin_id: int, message: str, *, photo_file_id: str | None = None,
+                           photo_unique_id: str | None = None, kind: str = "custom",
+                           content_hash: str | None = None) -> int:
+        """Черновик рассылки: текст (HTML-разметка Telegram), необязательная картинка, тип, отпечаток содержимого."""
         async with self._db.transaction() as conn:
             cursor = await conn.execute(
-                "INSERT INTO broadcasts (admin_id, message) VALUES (?, ?)", (admin_id, message)
+                "INSERT INTO broadcasts (admin_id, message, photo_file_id, photo_unique_id, kind, content_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (admin_id, message, photo_file_id, photo_unique_id, kind, content_hash),
             )
             return cursor.lastrowid
+
+    async def update_draft(self, broadcast_id: int, *, message: str | None = None, photo_file_id: str | None = None,
+                           photo_unique_id: str | None = None, clear_photo: bool = False,
+                           content_hash: str | None = None) -> bool:
+        """Правка черновика (только пока он draft): текст и/или картинка. Запущенную рассылку изменить нельзя."""
+        sets, params = [], []
+        if message is not None:
+            sets.append("message = ?"); params.append(message)
+        if clear_photo:
+            sets.append("photo_file_id = NULL"); sets.append("photo_unique_id = NULL")
+        elif photo_file_id is not None:
+            sets.append("photo_file_id = ?"); params.append(photo_file_id)
+            sets.append("photo_unique_id = ?"); params.append(photo_unique_id)
+        if content_hash is not None:
+            sets.append("content_hash = ?"); params.append(content_hash)
+        if not sets:
+            return False
+        return await self._db.execute(
+            f"UPDATE broadcasts SET {', '.join(sets)} WHERE id = ? AND status = 'draft'", (*params, broadcast_id)
+        ) > 0
+
+    async def find_recent_duplicate(self, content_hash: str, within_seconds: int, exclude_id: int | None = None) -> Broadcast | None:
+        """Недавно запущенная/завершённая рассылка с таким же содержимым — для предупреждения о повторной отправке."""
+        row = await self._db.fetchone(
+            "SELECT * FROM broadcasts WHERE content_hash = ? AND status IN ('running', 'done') AND id <> ? "
+            "AND started_ts IS NOT NULL AND started_ts >= ? ORDER BY id DESC LIMIT 1",
+            (content_hash, exclude_id if exclude_id is not None else -1, int(time.time()) - within_seconds),
+        )
+        return _broadcast(row) if row else None
 
     async def get(self, broadcast_id: int) -> Broadcast | None:
         row = await self._db.fetchone("SELECT * FROM broadcasts WHERE id = ?", (broadcast_id,))
@@ -535,9 +571,9 @@ class BroadcastRepository:
         (повторный callback) или другая рассылка ещё идёт."""
         async with self._db.transaction() as conn:
             cursor = await conn.execute(
-                "UPDATE broadcasts SET status = 'running', total_count = ? WHERE id = ? AND status = 'draft' "
+                "UPDATE broadcasts SET status = 'running', total_count = ?, started_ts = ? WHERE id = ? AND status = 'draft' "
                 "AND NOT EXISTS (SELECT 1 FROM broadcasts WHERE status = 'running')",
-                (len(targets), broadcast_id),
+                (len(targets), int(time.time()), broadcast_id),
             )
             if cursor.rowcount != 1:
                 return False
@@ -820,7 +856,7 @@ class UserEventRepository:
             "e.timezone AS e_timezone, e.status AS e_status, e.effective_from AS e_effective_from, "
             "e.created_at AS e_created_at, u.* "
             "FROM calendar_events e JOIN users u ON u.telegram_id = e.user_id "
-            "WHERE e.event_type = ? AND e.status = 'active'",
+            "WHERE e.event_type = ? AND e.status = 'active' AND NOT EXISTS (SELECT 1 FROM banned_users b WHERE b.telegram_id = u.telegram_id)",
             (EVENT_TYPE,),
         )
         result = []

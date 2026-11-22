@@ -170,7 +170,10 @@ class AdvisorTests(unittest.TestCase):
         return advise(facts)
 
     def test_levels(self):
-        self.assertEqual(thermal_level(-20), Thermal.EXTREME)
+        # пороги: < −25 лютый, < −12 сильный, < −5 мороз, < +4 холодно (значения проекта)
+        self.assertEqual(thermal_level(-30), Thermal.EXTREME)
+        self.assertEqual(thermal_level(-20), Thermal.HARD_FROST)
+        self.assertEqual(thermal_level(-8), Thermal.FROST)
         self.assertEqual(thermal_level(0), Thermal.COLD)
         self.assertEqual(thermal_level(20), Thermal.COMFORT)
         self.assertEqual(thermal_level(30), Thermal.HOT)
@@ -270,7 +273,7 @@ class GeneratorTests(unittest.TestCase):
     def test_weather_unavailable_does_not_invent(self):
         now = datetime(2026, 11, 9, 7, 30, tzinfo=TZ)
         text = self.gen(now, None)
-        self.assertIn("не удалось", text)
+        self.assertIn("Погода сейчас недоступна", text)
         self.assertNotIn("°", text)
         self.assertIn("7 уроков", text)
 

@@ -7,6 +7,7 @@ from aiogram.types import CallbackQuery, Message
 
 from bot.keyboards.main_menu import MENU_TEXTS
 from config import Settings, is_admin
+from services.intents import is_cancel
 from database.models import User
 
 
@@ -26,7 +27,16 @@ class NeedsOnboarding(BaseFilter):
         return user is not None and not user.name_confirmed and raw_state is None
 
 
-
 # Обычный текст, введённый пользователем в диалоге: не кнопка меню и не команда.
 # Благодаря этому нажатие кнопки меню посреди диалога не принимается за «имя» или «предмет».
 TEXT_INPUT = F.text & ~F.text.in_(MENU_TEXTS) & ~F.text.startswith("/")
+
+
+class WantsCancel(BaseFilter):
+    """Текст «отмена» / «cancel» / «стоп» посреди незавершённого сценария (кроме знакомства, которое обязательно).
+    Работает как естественный аналог кнопки «Отмена»."""
+
+    async def __call__(self, message: Message, raw_state: str | None = None) -> bool:
+        if raw_state is None or raw_state.startswith("Onboarding:"):
+            return False
+        return is_cancel(message.text or "")

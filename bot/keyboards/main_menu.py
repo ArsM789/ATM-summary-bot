@@ -4,6 +4,7 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 from bot.keyboards.common import button
+from bot.keyboards.nav import nav_row
 
 BTN_SUMMARY = "🌤 Сводка"
 BTN_LESSONS = "📅 Моё расписание"
@@ -31,4 +32,4 @@ def main_menu() -> ReplyKeyboardMarkup:
 
 
 def summary_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[button("🔄 Обновить", "summary:refresh", style="primary")]])
+    return InlineKeyboardMarkup(inline_keyboard=[[button("🔄 Обновить", "summary:refresh", style="primary")], nav_row()])

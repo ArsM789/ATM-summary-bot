@@ -100,6 +100,10 @@ class Broadcast:
     success_count: int
     failed_count: int
     blocked_count: int
+    photo_file_id: str | None = None
+    photo_unique_id: str | None = None
+    kind: str = "custom"
+    content_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,6 +4,7 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardMarkup
 
 from bot.keyboards.common import button, markup
+from bot.keyboards.nav import nav_row
 from database.models import ScheduleEntry
 
 
@@ -14,23 +15,24 @@ def settings_keyboard(notifications_enabled: bool) -> InlineKeyboardMarkup:
         [button("🏙 Город", "st:city"), button("🕒 Часовой пояс", "st:tz")],
         [button("⏰ Время сводок", "st:times"), button(toggle, "st:notif")],
         [button("🧪 Тестовая сводка", "st:test")],
+        nav_row(),
     )
 
 
 def cancel_keyboard(data: str = "st:cancel") -> InlineKeyboardMarkup:
-    return markup([button("Отмена", data)])
+    return markup([button("❌ Отмена", data)])
 
 
 def cities_keyboard(labels: list[str]) -> InlineKeyboardMarkup:
     rows = [[button(label, f"ct:{i}")] for i, label in enumerate(labels)]
-    rows.append([button("Отмена", "st:cancel")])
+    rows.append([button("❌ Отмена", "st:cancel")])
     return markup(*rows)
 
 
 def times_keyboard(entries: list[ScheduleEntry]) -> InlineKeyboardMarkup:
     rows = [[button(f"{'✅' if e.enabled else '⏸'} {e.send_time}", f"tm:open:{e.id}")] for e in entries]
     rows.append([button("➕ Добавить время", "tm:add")])
-    rows.append([button("‹ Назад", "st:home")])
+    rows.append(nav_row("st:home"))
     return markup(*rows)
 
 
@@ -39,7 +41,7 @@ def time_entry_keyboard(entry: ScheduleEntry) -> InlineKeyboardMarkup:
     return markup(
         [button(toggle, f"tm:tog:{entry.id}"), button("✏️ Изменить время", f"tm:edit:{entry.id}")],
         [button("🗑 Удалить", f"tm:del:{entry.id}", style="danger")],
-        [button("‹ К списку", "st:times")],
+        nav_row("st:times"),
     )
 
 

@@ -28,7 +28,10 @@ class FeedbackInput(StatesGroup):
 
 
 class AdminBroadcast(StatesGroup):
-    text = State()
+    text = State()      # ждём сообщение рассылки (текст или фото с подписью)
+    edit = State()      # ждём новый текст для существующего черновика
+    photo = State()     # ждём картинку для черновика
+    preview = State()   # черновик показан, ждём решения администратора
 
 
 class EventForm(StatesGroup):

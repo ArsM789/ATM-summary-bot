@@ -15,11 +15,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot.filters import TEXT_INPUT
-from bot.helpers import edit_or_reply
+from bot.helpers import edit_or_reply, reply
 from bot.keyboards.lessons_menu import (
     clear_confirm_keyboard, confirm_keyboard, day_keyboard, input_keyboard, overview_keyboard, partial_keyboard,
 )
-from bot.keyboards.main_menu import BTN_LEGACY_SCHEDULE, BTN_LESSONS, main_menu
+from bot.keyboards.main_menu import BTN_LEGACY_SCHEDULE, BTN_LESSONS
 from bot.states.settings_states import LessonsInput
 from database.models import LessonItem, User, expand_lessons
 from database.repositories import LessonsLimitError, WeeklyScheduleRepository
@@ -33,7 +33,7 @@ from utils.formatting import capitalize_first, esc, lessons_phrase
 router = Router(name="lessons")
 router.message.filter(F.chat.type == ChatType.PRIVATE)
 
-SCHOOL_DAYS = range(6)
+SCHOOL_DAYS = range(5)
 
 FORMAT_HELP = (
     "Каждый предмет — с новой строки (или через запятую):\n"
@@ -75,7 +75,7 @@ async def _overview_text(weekly: WeeklyScheduleRepository, user_id: int) -> str:
             lines.append(format_day_quote(items))
         else:
             lines.append(f"<b>{_day_name(d)}</b> — не заполнено")
-    lines.append("\n<i>Воскресенье — выходной. Выбери день, чтобы изменить его.</i>")
+    lines.append("\n<i>Суббота и воскресенье — выходные. Выбери день, чтобы изменить его.</i>")
     return "\n".join(lines)
 
 
@@ -87,20 +87,26 @@ async def _day_text(weekly: WeeklyScheduleRepository, user_id: int, weekday: int
     return f"{prefix}📅 <b>{_day_name(weekday)}</b> — пока не заполнено", False
 
 
+async def show_overview(event: Message | CallbackQuery, user: User, weekly: WeeklyScheduleRepository, *,
+                        fresh: bool = False, notice: str = "") -> None:
+    """Экран «Моё расписание» (используется и из меню, и из inline-хаба)."""
+    text = await _overview_text(weekly, user.telegram_id)
+    await reply(event, (notice + "\n\n" if notice else "") + text, reply_markup=overview_keyboard(), fresh=fresh)
+
+
 @router.message(F.text.in_({BTN_LESSONS, BTN_LEGACY_SCHEDULE}))
 @router.message(Command("lessons"))
 async def open_lessons(message: Message, user: User, weekly: WeeklyScheduleRepository, state: FSMContext) -> None:
     await state.clear()
-    if message.text == BTN_LEGACY_SCHEDULE:  # старая кнопка: обновляем клавиатуру
-        await message.answer("Кнопка «Расписание» теперь называется «📅 Моё расписание».", reply_markup=main_menu())
-    await message.answer(await _overview_text(weekly, user.telegram_id), reply_markup=overview_keyboard())
+    notice = "<i>Кнопка «Расписание» теперь называется «📅 Моё расписание».</i>" if message.text == BTN_LEGACY_SCHEDULE else ""
+    await show_overview(message, user, weekly, fresh=True, notice=notice)
 
 
 @router.callback_query(F.data == "ls:home")
 async def back_home(callback: CallbackQuery, user: User, weekly: WeeklyScheduleRepository, state: FSMContext) -> None:
     await state.clear()
     await callback.answer()
-    await edit_or_reply(callback, await _overview_text(weekly, user.telegram_id), reply_markup=overview_keyboard())
+    await show_overview(callback, user, weekly)
 
 
 @router.callback_query(F.data.startswith("ls:day:"))
@@ -146,7 +152,7 @@ async def _start_week(event: CallbackQuery, state: FSMContext) -> None:
         "📋 Вставь расписание на неделю <b>одним сообщением</b>, с названиями дней:\n"
         "<code>Понедельник\nМатематика - 2\nФизика\n\nВторник: Алгебра, Геометрия, Биология - 2</code>\n"
         "Подойдут полные названия и сокращения (Пн, Вт…). Предмет без числа — один урок. "
-        "Дни, которых нет в сообщении, не изменятся; воскресенье пропускаются.",
+        "Дни, которых нет в сообщении, не изменятся; суббота и воскресенье пропускаются.",
         reply_markup=input_keyboard(False),
     )
 
@@ -210,7 +216,7 @@ async def got_lessons_text(message: Message, user: User, weekly: WeeklyScheduleR
     mode, weekday = data.get("mode"), data.get("weekday")
     if mode is None or (mode != "week" and weekday is None):
         await state.clear()
-        await message.answer("Диалог устарел. Открой «📅 Моё расписание» заново.")
+        await reply(message, "Диалог устарел. Открой «📅 Моё расписание» заново.", reply_markup=overview_keyboard())
         return
     if mode == "week":
         await _handle_week(message, state)
@@ -237,20 +243,21 @@ async def _handle_day(message: Message, user: User, weekly: WeeklyScheduleReposi
         if accepted:
             text += (f"\nПринято (пока не сохранено):\n{format_day_quote(accepted)}\n"
                      "Пришли исправленные строки — добавлю к принятым, или сохрани то, что есть.")
-            await message.answer(text, reply_markup=partial_keyboard())
+            await reply(message, text, reply_markup=partial_keyboard())
         else:
-            await message.answer(text + "\nИсправь и пришли ещё раз.", reply_markup=input_keyboard(bool(data.get("wizard"))))
+            await reply(message, text + "\nИсправь и пришли ещё раз.", reply_markup=input_keyboard(bool(data.get("wizard"))))
         return
 
     if not accepted:
-        await message.answer("Не нашёл ни одного предмета. Напиши название, например «Математика» или «Математика — 2».")
+        await reply(message, "⚠️ Не нашёл ни одного предмета. Напиши название, например «Математика» или «Математика — 2».",
+                    reply_markup=input_keyboard(bool(data.get("wizard"))))
         return
 
     existing = await weekly.get_day(user.telegram_id, weekday) if mode == "add" else []
     total_error = day_total_error(existing + accepted)
     if total_error:
         await state.update_data(pending=[])
-        await message.answer(
+        await reply(message,
             f"Так не получится: {esc(total_error)}. Пришли список заново, покороче.",
             reply_markup=input_keyboard(bool(data.get("wizard"))),
         )
@@ -264,7 +271,7 @@ async def _handle_day(message: Message, user: User, weekly: WeeklyScheduleReposi
     else:
         text = f"Добавлю в конец дня <b>{_day_name(weekday).lower()}</b> — {lessons_phrase(n)}:\n{format_day_quote(accepted)}"
         verb = "Добавить"
-    await message.answer(text, reply_markup=confirm_keyboard(verb))
+    await reply(message, text, reply_markup=confirm_keyboard(verb))
 
 
 async def _handle_week(message: Message, state: FSMContext) -> None:
@@ -278,7 +285,7 @@ async def _handle_week(message: Message, state: FSMContext) -> None:
             where = f"строка {e.line_no} «{esc(e.text)}» — " if e.line_no else ""
             problems.append(f"• {_day_name(day)}: {where}{esc(e.reason)}")
     if problems:
-        await message.answer(
+        await reply(message,
             "Не всё получилось разобрать:\n" + "\n".join(problems) +
             "\n\nНичего не сохранено. Исправь и пришли сообщение с неделей ещё раз целиком.",
             reply_markup=input_keyboard(False),
@@ -286,7 +293,8 @@ async def _handle_week(message: Message, state: FSMContext) -> None:
         return
     days = {d: r.items for d, r in result.days.items() if r.items}
     if not days:
-        await message.answer("Не нашёл ни одного предмета. Нужны заголовки дней и предметы под ними.")
+        await reply(message, "⚠️ Не нашёл ни одного предмета. Нужны заголовки дней и предметы под ними.",
+                    reply_markup=input_keyboard(False))
         return
     await state.update_data(week_pending=[[d, _items_to_data(items)] for d, items in sorted(days.items())])
     blocks = [
@@ -297,14 +305,14 @@ async def _handle_week(message: Message, state: FSMContext) -> None:
     if result.empty_days:
         notes.append("Без предметов, не изменятся: " + ", ".join(_day_name(d).lower() for d in result.empty_days) + ".")
     if result.weekend_skipped:
-        notes.append("Воскресенье пропущено — это выходной.")
+        notes.append("Суббота и воскресенье пропущены — это выходные.")
     untouched = [d for d in SCHOOL_DAYS if d not in days]
     if untouched:
         notes.append("Не будут затронуты: " + ", ".join(_day_name(d).lower() for d in untouched) + ".")
     text = "Заменю расписание этих дней:\n\n" + "\n".join(blocks)
     if notes:
         text += "\n\n<i>" + " ".join(notes) + "</i>"
-    await message.answer(text, reply_markup=confirm_keyboard(f"Заменить дни ({len(days)})"))
+    await reply(message, text, reply_markup=confirm_keyboard(f"Заменить дни ({len(days)})"))
 
 
 async def _handle_remove(message: Message, user: User, weekly: WeeklyScheduleRepository,
@@ -313,14 +321,14 @@ async def _handle_remove(message: Message, user: User, weekly: WeeklyScheduleRep
     total = total_lessons(existing)
     numbers, error = parse_numbers(message.text or "", total)
     if error:
-        await message.answer(esc(error), reply_markup=input_keyboard(False))
+        await reply(message, esc(error), reply_markup=input_keyboard(False))
         return
     lessons = expand_lessons(existing)
     removed = "\n".join(f"{n}. {esc(lessons[n - 1])}" for n in numbers)
     remaining = remove_lessons(existing, numbers)
     await state.update_data(mode="replace", origin="remove", pending=_items_to_data(remaining), allow_empty=True)
     tail = (f"Останется:\n{format_day_quote(remaining)}" if remaining else "Тогда день останется пустым.")
-    await message.answer(
+    await reply(message,
         f"Уберу из <b>{_day_name(weekday).lower()}</b>:\n<blockquote>{removed}</blockquote>\n{tail}",
         reply_markup=confirm_keyboard("Убрать"),
     )
@@ -377,7 +385,7 @@ async def save_pending(callback: CallbackQuery, user: User, weekly: WeeklySchedu
         return
     await callback.answer("Сохранено ✅")
 
-    if data.get("wizard") and weekday < 5:
+    if data.get("wizard") and weekday < 4:
         await _start_input(callback, state, weekly, user.telegram_id, weekday + 1, "replace", wizard=True)
         return
     await state.clear()
@@ -394,7 +402,7 @@ async def skip_day(callback: CallbackQuery, user: User, weekly: WeeklyScheduleRe
     data = await state.get_data()
     weekday = data.get("weekday")
     await callback.answer()
-    if data.get("wizard") and weekday is not None and weekday < 5:
+    if data.get("wizard") and weekday is not None and weekday < 4:
         await _start_input(callback, state, weekly, user.telegram_id, weekday + 1, "replace", wizard=True)
         return
     await state.clear()

@@ -12,7 +12,7 @@ from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.types import BotCommand
 
 from bot.handlers import (
-    admin, errors, events as events_handlers, fallback, feedback, inline_mode, lessons, onboarding,
+    admin, errors, events as events_handlers, fallback, feedback, inline_mode, lessons, nav, onboarding,
     schedule, settings as settings_handlers, start, summary,
 )
 from bot.keyboards.main_menu import summary_keyboard
@@ -79,7 +79,7 @@ async def main() -> int:
     feedback_repo = FeedbackRepository(db)
     broadcast_repo = BroadcastRepository(db)
     generator = SummaryGenerator(EmojiPack(settings.custom_emoji))
-    summaries = SummaryService(weekly, users, weather, generator, events=events)
+    summaries = SummaryService(weekly, users, weather, generator, events=events, user_events=user_events)
 
     interrupted = await broadcast_repo.mark_interrupted()  # рассылки, оборванные прошлым перезапуском
     if interrupted:
@@ -115,6 +115,7 @@ async def main() -> int:
     dp.include_router(errors.router)
     dp.include_router(onboarding.router)
     dp.include_router(start.router)
+    dp.include_router(nav.router)          # «🏠 В меню», тур, отмена — раньше обработчиков сценариев
     dp.include_router(summary.router)
     dp.include_router(lessons.router)
     dp.include_router(settings_handlers.router)

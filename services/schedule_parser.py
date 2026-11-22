@@ -172,7 +172,7 @@ def parse_lessons(text: str) -> ParseResult:
 
 @dataclass(slots=True)
 class WeekParseResult:
-    days: dict[int, ParseResult] = field(default_factory=dict)   # только учебные дни 0..5
+    days: dict[int, ParseResult] = field(default_factory=dict)   # только учебные дни 0..4
     errors: list[LineError] = field(default_factory=list)
     empty_days: list[int] = field(default_factory=list)          # заголовок есть, предметов нет — не трогаем
     weekend_skipped: bool = False
@@ -185,7 +185,7 @@ class WeekParseResult:
 def parse_week(text: str) -> WeekParseResult:
     """Текст вида:  «Понедельник\\nМатематика - 2\\nФизика\\n\\nВторник: Алгебра, Геометрия, Биология - 2».
     Заголовок дня — полное название или сокращение (Пн, Вт…); после него — предметы на следующих строках или
-    сразу через «:».воскресенье пропускается (выходные)."""
+    сразу через «:». Суббота и воскресенье пропускаются (выходные)."""
     week = WeekParseResult()
     current: int | None = None
     seen: set[int] = set()
@@ -204,7 +204,7 @@ def parse_week(text: str) -> WeekParseResult:
                 continue
             seen.add(day)
             current = day
-            if day == 6:
+            if day >= 5:
                 week.weekend_skipped = True
                 continue
             buffers.setdefault(day, [])
@@ -213,7 +213,7 @@ def parse_week(text: str) -> WeekParseResult:
             continue
         if current is None:
             week.errors.append(LineError(line_no, raw.strip(), "строка вне дня недели — сначала напиши день («Понедельник»)"))
-        elif current < 6:
+        elif current < 5:
             buffers[current].append((line_no, raw))
 
     for day, lines in sorted(buffers.items()):

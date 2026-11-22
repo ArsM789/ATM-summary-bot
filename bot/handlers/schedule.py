@@ -42,18 +42,19 @@ async def _list_text(user: User, schedules: ScheduleRepository) -> tuple[str, li
     return "\n".join(lines), entries
 
 
-async def show_times(event: Message | CallbackQuery, user: User, schedules: ScheduleRepository, *, edit: bool) -> None:
+async def show_times(event: Message | CallbackQuery, user: User, schedules: ScheduleRepository, *, edit: bool = False,
+                     fresh: bool = False, notice: str = "") -> None:
+    """Список времён автосводок. notice — результат действия первой строкой (без отдельного сообщения)."""
     text, entries = await _list_text(user, schedules)
-    if edit and isinstance(event, CallbackQuery):
-        await edit_or_reply(event, text, reply_markup=times_keyboard(entries))
-    else:
-        await reply(event, text, reply_markup=times_keyboard(entries))
+    if notice:
+        text = f"{notice}\n\n{text}"
+    await reply(event, text, reply_markup=times_keyboard(entries), fresh=fresh)
 
 
 @router.message(Command("schedule"))
 async def cmd_schedule(message: Message, user: User, schedules: ScheduleRepository, state: FSMContext) -> None:
     await state.clear()
-    await show_times(message, user, schedules, edit=False)
+    await show_times(message, user, schedules, fresh=True)
 
 
 @router.callback_query(F.data == "st:times")
@@ -145,12 +146,14 @@ async def ask_edit_time(callback: CallbackQuery, user: User, schedules: Schedule
 
 @router.message(StateFilter(SendTimeInput.value), TEXT_INPUT)
 async def got_time(message: Message, user: User, schedules: ScheduleRepository, state: FSMContext) -> None:
-    value = parse_hhmm(message.text or "")
-    if value is None:
-        await message.answer("Не похоже на время. Нужен формат <b>ЧЧ:ММ</b>, например <code>07:30</code> или <code>21:05</code>.")
-        return
     data = await state.get_data()
     entry_id = data.get("entry_id")
+    back = "st:times" if entry_id is None else f"tm:open:{entry_id}"
+    value = parse_hhmm(message.text or "")
+    if value is None:
+        await reply(message, "⚠️ Не похоже на время. Нужен формат <b>ЧЧ:ММ</b>, например <code>07:30</code> или <code>21:05</code>.",
+                    reply_markup=cancel_keyboard(back))
+        return
     try:
         if entry_id is None:
             await schedules.add(user.telegram_id, value)
@@ -159,12 +162,11 @@ async def got_time(message: Message, user: User, schedules: ScheduleRepository, 
             changed = await schedules.update_time(user.telegram_id, entry_id, value)
             note = f"✅ Время изменено на <b>{value}</b>." if changed else "Это время уже удалено."
     except DuplicateTimeError:
-        await message.answer(f"Время <b>{value}</b> уже есть в списке. Напиши другое.")
+        await reply(message, f"⚠️ Время <b>{value}</b> уже есть в списке. Напиши другое (ЧЧ:ММ).", reply_markup=cancel_keyboard(back))
         return
     except ScheduleLimitError:
         await state.clear()
-        await message.answer("Достигнут лимит: не больше 10 времён отправки. Удали ненужные.")
+        await show_times(message, user, schedules, notice="⚠️ Достигнут лимит: не больше 10 времён отправки. Удали ненужные.")
         return
     await state.clear()
-    await message.answer(note)
-    await show_times(message, user, schedules, edit=False)
+    await show_times(message, user, schedules, notice=note)

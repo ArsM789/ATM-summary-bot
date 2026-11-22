@@ -29,6 +29,7 @@ class Settings:
     default_longitude: float
     default_timezone: str
     default_send_time: str
+    default_evening_time: str
     admin_id: int | None
     broadcast_rate: float
     max_user_events: int
@@ -131,6 +132,9 @@ def load_settings() -> Settings:
     send_time = os.getenv("DEFAULT_SEND_TIME", "07:00").strip()
     if not _TIME_RE.match(send_time):
         raise ConfigError("DEFAULT_SEND_TIME должно быть в формате ЧЧ:ММ, например 07:00")
+    evening_time = os.getenv("DEFAULT_EVENING_SEND_TIME", "18:00").strip()
+    if not _TIME_RE.match(evening_time):
+        raise ConfigError("DEFAULT_EVENING_SEND_TIME должно быть в формате ЧЧ:ММ, например 18:00")
 
     db_path = Path(os.getenv("DATABASE_PATH", "data/atm_morning.db").strip())
     if not db_path.is_absolute():
@@ -138,12 +142,13 @@ def load_settings() -> Settings:
 
     return Settings(
         bot_token=token,
-        bot_name=os.getenv("BOT_NAME", "ATM Morning Assistant").strip() or "Deylo",
+        bot_name=os.getenv("BOT_NAME", "Deylo").strip() or "Deylo",
         default_city=os.getenv("DEFAULT_CITY", "Казань").strip() or "Казань",
         default_latitude=_get_float("DEFAULT_LATITUDE", 55.7887, -90, 90),
         default_longitude=_get_float("DEFAULT_LONGITUDE", 49.1221, -180, 180),
         default_timezone=timezone,
         default_send_time=send_time,
+        default_evening_time=evening_time,
         admin_id=_parse_admin_id(os.getenv("ADMIN_ID", "")),
         broadcast_rate=_get_float("BROADCAST_RATE", 15, 1, 28),
         max_user_events=_parse_max_events(os.getenv("MAX_USER_EVENTS", "")),

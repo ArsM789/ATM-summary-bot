@@ -1,16 +1,18 @@
-"""Кнопка «Сводка» (и команда /summary), плюс «Обновить» под сообщением."""
+"""Кнопка «Сводка» (и команда /summary), «Обновить» и вход из главного меню (inline).
+
+Сводка — это один экран: «Обновить» редактирует то же сообщение, повторное нажатие меню не плодит сообщений."""
 from __future__ import annotations
 
 import logging
 
-from aiogram import Bot, F, Router
+from aiogram import F, Router
 from aiogram.enums import ChatAction, ChatType
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot.keyboards.main_menu import BTN_SUMMARY, summary_keyboard
+from bot.ui import ui
 from database.models import User
 from services.summary_service import SummaryService
 from utils.helpers import InFlightGuard
@@ -23,37 +25,34 @@ router.message.filter(F.chat.type == ChatType.PRIVATE)
 ACTION = "summary"
 
 
-@router.message(F.text == BTN_SUMMARY)
-@router.message(Command("summary"))
-async def on_summary(
-    message: Message, user: User, summaries: SummaryService, guard: InFlightGuard, bot: Bot, state: FSMContext
-) -> None:
-    await state.clear()  # нажатие кнопки меню завершает любой незаконченный диалог
+async def show_summary(event: Message | CallbackQuery, user: User, summaries: SummaryService, guard: InFlightGuard,
+                       *, fresh: bool = False) -> None:
+    """Собирает и показывает сводку. Двойной тап не запускает вторую сборку."""
     if not guard.try_acquire(user.telegram_id, ACTION):
-        return  # сводка уже готовится — повторный тап игнорируем
+        if isinstance(event, CallbackQuery):
+            await event.answer("Уже готовлю…")
+        else:
+            await ui.delete(event.bot, event.chat.id, event.message_id)   # лишнее нажатие меню убираем из чата
+        return
     try:
-        await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+        if isinstance(event, CallbackQuery):
+            await event.answer()
+        else:
+            await event.bot.send_chat_action(event.chat.id, ChatAction.TYPING)
         result = await summaries.build(user)
-        await message.answer(result.text, reply_markup=summary_keyboard())
+        await ui.show(event, result.text, summary_keyboard(), fresh=fresh)
     finally:
         guard.release(user.telegram_id, ACTION)
+
+
+@router.message(F.text == BTN_SUMMARY)
+@router.message(Command("summary"))
+async def on_summary(message: Message, user: User, summaries: SummaryService, guard: InFlightGuard,
+                     state: FSMContext) -> None:
+    await state.clear()  # нажатие кнопки меню завершает любой незаконченный диалог
+    await show_summary(message, user, summaries, guard, fresh=True)
 
 
 @router.callback_query(F.data == "summary:refresh")
 async def on_refresh(callback: CallbackQuery, user: User, summaries: SummaryService, guard: InFlightGuard) -> None:
-    if not guard.try_acquire(user.telegram_id, ACTION):
-        await callback.answer("Уже обновляю…")
-        return
-    try:
-        await callback.answer()
-        result = await summaries.build(user)
-        if isinstance(callback.message, Message):
-            try:
-                await callback.message.edit_text(result.text, reply_markup=summary_keyboard())
-            except TelegramBadRequest as exc:
-                if "message is not modified" not in str(exc):
-                    raise
-        else:  # сообщение слишком старое и недоступно для редактирования
-            await callback.bot.send_message(callback.from_user.id, result.text, reply_markup=summary_keyboard())
-    finally:
-        guard.release(user.telegram_id, ACTION)
+    await show_summary(callback, user, summaries, guard)

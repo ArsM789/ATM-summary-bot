@@ -22,23 +22,9 @@ from services.time_service import DayPart, WEEKDAYS_ACC, day_part, format_date, 
 from services.weather_models import WeatherReport, describe_code
 from services.schedule_parser import format_day_quote, total_lessons
 from utils.formatting import (
-    EmojiPack, capitalize_first, esc, fmt_range, fmt_speed, fmt_temp,
+    EmojiPack, capitalize_first, esc, fmt_span, fmt_speed, fmt_temp,
     join_ru, lessons_phrase, round_half_up,
 )
-
-# Слова, описывающие тепловой уровень. Один и тот же уровень используется и в описании
-# погоды, и в советах по одежде — поэтому противоречий («жарко» + «пуховик») быть не может.
-_LEVEL_WORDS: dict[Thermal, tuple[str, ...]] = {
-    Thermal.EXTREME: ("лютый мороз", "очень сильный мороз"),
-    Thermal.HARD_FROST: ("сильный мороз", "крепкий мороз"),
-    Thermal.FROST: ("морозно", "подмораживает"),
-    Thermal.COLD: ("холодно", "довольно холодно"),
-    Thermal.COOL: ("прохладно", "довольно прохладно"),
-    Thermal.FRESH: ("свежо", "немного прохладно"),
-    Thermal.COMFORT: ("комфортно", "приятно", "тепло, но не жарко"),
-    Thermal.WARM: ("тепло", "по-настоящему тепло"),
-    Thermal.HOT: ("жарко", "очень жарко"),
-}
 
 _PRECIP_OF_KIND = {"drizzle": "rain", "rain": "rain", "snow": "snow", "freezing": "freezing", "thunder": "thunder"}
 _PRECIP_WORDS = {
@@ -51,12 +37,21 @@ _PRECIP_WORDS = {
 
 
 @dataclass(frozen=True)
+class NextEvent:
+    """Ближайшая задача пользователя (из «Мои события»): название и локальное время начала."""
+
+    title: str
+    start: datetime
+
+
+@dataclass(frozen=True)
 class SummaryContext:
     user: User
-    schedule: Mapping[int, Sequence[LessonItem]]  # расписание ЭТОГО пользователя: 0 = понедельник ... 5 = суббота
+    schedule: Mapping[int, Sequence[LessonItem]]  # расписание ЭТОГО пользователя: 0 = понедельник ... 4 = пятница
     now: datetime                                 # aware, в часовом поясе пользователя
     report: WeatherReport | None                  # None — погоду получить не удалось
     address: str | None = None                    # выбранный вариант обращения (None -> основное имя)
+    next_event: NextEvent | None = None           # ближайшая задача на сегодня (показывается утром и днём)
 
 
 @dataclass(frozen=True)
@@ -99,31 +94,31 @@ class SummaryGenerator:
     # ----------------------------- публичный API -----------------------------
 
     def generate(self, ctx: SummaryContext) -> str:
+        """Компактная сводка: приветствие, дата, «карточка» погоды и одежды, расписание, ближайшая задача, концовка.
+        Утром и днём — про сегодня; вечером (с 17:00) — про завтра."""
         focus = resolve_focus(ctx.now)
         uid = ctx.user.telegram_id
         name = esc(ctx.address or ctx.user.name)
-        today = ctx.now.date()
 
         greeting = self._greeting(uid, focus.part, name)
         name_used = name in greeting  # имя в сообщении появляется один раз, а не в каждой фразе
 
-        blocks: list[str] = [
-            f"<b>{greeting}</b>",
-            f"{self._emo('calendar')} {capitalize_first(weekday_name(today))}, {format_date(today)} · {esc(ctx.user.city)}",
-        ]
+        day = focus.focus_date
+        date_line = f"{capitalize_first(weekday_name(day))}, {format_date(day)}"
+        if focus.is_tomorrow:
+            date_line = f"Завтра: {weekday_name(day)}, {format_date(day)}"
+        blocks: list[str] = [f"<b>{greeting}</b>", f"{self._emo('calendar')} {date_line} · {esc(ctx.user.city)}"]
 
         if ctx.report is not None:
             advice = advise(self._facts(ctx.report, focus))
-            blocks.append(self._weather_text(uid, ctx, focus, advice))
-            blocks.append(f"{self._emo('jacket')} {self._clothing_text(uid, focus, advice)}")
+            blocks.append(self._weather_card(uid, ctx, focus, advice))
         else:
-            blocks.append(
-                f"{self._emo('cloud')} Погоду сейчас получить не удалось — выдумывать её не буду. "
-                f"Попробуй «Сводка» ещё раз чуть позже."
-            )
+            blocks.append(f"{self._emo('cloud')} Погода сейчас недоступна — не буду гадать. Загляни в «Сводку» чуть позже.")
 
         lessons_block, mode, total = self._lessons_block(uid, focus, ctx.schedule)
         blocks.append(lessons_block)
+        if ctx.next_event is not None and not focus.is_tomorrow:
+            blocks.append(self._event_block(ctx.next_event))
         blocks.append(f"<i>{self._closing(uid, focus, mode, total, None if name_used else name)}</i>")
         return "\n\n".join(blocks)
 
@@ -178,112 +173,96 @@ class SummaryGenerator:
     def _day_word(focus: Focus) -> str:
         return "Завтра" if focus.is_tomorrow else "Сегодня"
 
-    def _weather_text(self, uid: int, ctx: SummaryContext, focus: Focus, advice: ClothingAdvice) -> str:
-        """Короткий абзац: переход к погоде, описание неба, цифры (сейчас / диапазон дня / ветер), осадки."""
+    def _weather_card(self, uid: int, ctx: SummaryContext, focus: Focus, advice: ClothingAdvice) -> str:
+        """Погода и одежда одним блоком-цитатой, по строке на смысл:
+            ☁️ Пасмурно, −3…+2 °C
+            сейчас +1° (ощущ. −2°) · 💨 6 м/с · ☔ дождь до 40%
+            👕 Надеть: тёплую куртку, шапку, перчатки
+            🎒 Взять: зонт
+            ⚠️ Возможна наледь …"""
         facts = advice.facts
         report = ctx.report
         assert report is not None
-        cur = report.current
-        day = self._day_word(focus)
-        adjective = self._pick(uid, f"level:{advice.level.name}", _LEVEL_WORDS[advice.level])
-        sky_condition = describe_code(facts.dominant_code)
-        sky = sky_condition.text
-
-        intro = self._pick(uid, "weather_intro", [
-            f"За окном {sky}, {adjective}.",
-            f"{capitalize_first(sky)}, {adjective}.",
-            f"Что с погодой: {sky}, {adjective}.",
-            f"На улице {adjective}, {sky}.",
-        ])
-
-        now_part = f"сейчас {fmt_temp(cur.temp, '°')}"
-        if abs(cur.apparent - cur.temp) >= 2:
-            now_part += f" (ощущается как {fmt_temp(cur.apparent)})"
+        sky = describe_code(facts.dominant_code)
         forecast = report.day(focus.focus_date)
-        range_part = f"{day.lower()} {fmt_range(forecast.temp_min, forecast.temp_max)}" if forecast else ""
-        wind_part = ""
+
+        head = capitalize_first(sky.text)
+        if forecast is not None:
+            head += f", {fmt_span(forecast.temp_min, forecast.temp_max)}"
+        lines = [f"{sky.emoji} <b>{head}</b>"]
+
+        details: list[str] = []
+        if not focus.is_tomorrow:
+            cur = report.current
+            now_part = f"сейчас {fmt_temp(cur.temp)}"
+            if abs(cur.apparent - cur.temp) >= 2:
+                now_part += f" (ощущ. {fmt_temp(cur.apparent)})"
+            details.append(now_part)
         if facts.hours_count and facts.max_wind >= 6:
-            wind_part = f", ветер до {fmt_speed(facts.max_wind)}"
+            wind = f"{self._emo('wind')} {fmt_speed(facts.max_wind)}"
             if facts.max_gust - facts.max_wind >= 4:
-                wind_part += f" (порывы до {fmt_speed(facts.max_gust)})"
+                wind += f" (порывы {fmt_speed(facts.max_gust)})"
+            details.append(wind)
+        precip, prob = facts.precip_kind, facts.max_precip_prob
+        icon = "❄️" if precip in ("snow", "mixed") else "☔"
+        if precip:
+            already_in_headline = _PRECIP_OF_KIND.get(sky.kind) == precip      # «Снег, …» уже сказано заголовком
+            word = "" if already_in_headline else f"{_PRECIP_WORDS[precip][0]} "
+            details.append(f"{icon} {word}до {round_half_up(prob)}%" if prob is not None else f"{icon} {word}".strip())
+        elif prob is not None and prob >= 20:
+            details.append(f"☔ до {round_half_up(prob)}%")
+        if details:
+            lines.append(" · ".join(details))
 
-        pieces = [now_part] + ([range_part] if range_part else [])
-        numbers = self._pick(uid, "weather_numbers", [
-            f"{capitalize_first(', '.join(pieces))}{wind_part}.",
-            f"{capitalize_first(', '.join(reversed(pieces)))}{wind_part}.",
-        ])
-        parts = [f"{sky_condition.emoji} {intro}", numbers]
+        lines.extend(self._clothing_lines(uid, advice))
+        return "<blockquote>" + "\n".join(lines) + "</blockquote>"
 
-        precip = facts.precip_kind
-        prob = facts.max_precip_prob
-        if precip and _PRECIP_OF_KIND.get(sky_condition.kind) != precip:
-            word, _ = _PRECIP_WORDS[precip]
-            prob_part = f" (вероятность до {round_half_up(prob)}%)" if prob is not None else ""
-            if precip == "thunder":
-                parts.append(f"Возможна {word}{prob_part}.")
-            elif prob is not None and prob >= 60:
-                parts.append(f"Ожидается {word}{prob_part}.")
-            else:
-                parts.append(f"Возможен {word}{prob_part}.")
-        elif not precip and prob is not None and prob >= 20:
-            parts.append(f"Вероятность осадков — до {round_half_up(prob)}%.")
-        return " ".join(parts)
-
-    # ----------------------------- одежда -----------------------------
-
-    def _clothing_text(self, uid: int, focus: Focus, advice: ClothingAdvice) -> str:
+    def _clothing_lines(self, uid: int, advice: ClothingAdvice) -> list[str]:
+        """Одежда короткими строками: что надеть (всё нужное в одной строке), что взять, по желанию, одно предупреждение."""
         o = advice.outfit
-        wear_required = o.texts((OUTER, CORE, LEGS, FEET), optional=False)
-        accessories_required = o.texts((HEAD, HANDS, NECK), optional=False)
-        extras_required = o.texts((EXTRAS,), optional=False)
-        optional_items = o.texts((OUTER, CORE, LEGS, FEET, HEAD, HANDS, NECK), optional=True)
-        extras_optional = o.texts((EXTRAS,), optional=True)
+        wear = self._short_wear(o, advice.level)
+        take = o.texts((EXTRAS,), optional=False)
+        maybe = o.texts((OUTER, CORE, LEGS, FEET, HEAD, HANDS, NECK), optional=True)
+        maybe_take = o.texts((EXTRAS,), optional=True)
 
-        # Нужные «обычные» вещи; ограничиваем длину, чтобы фраза читалась.
-        main_items = wear_required[:4]
-        sentences: list[str] = []
+        lines: list[str] = []
+        if wear:
+            label = self._pick(uid, "wear_label", ["Надеть", "Лучше надеть"])
+            lines.append(f"{self._emo('jacket')} {label}: <b>{join_ru(wear[:4])}</b>")
+        if take:
+            lines.append(f"🎒 Взять: <b>{join_ru(take)}</b>")
+        extra: list[str] = []
+        if maybe:
+            extra.append("можно добавить: " + join_ru(maybe[:2]))
+        if maybe_take:
+            extra.append("на всякий случай взять " + join_ru(maybe_take))
+        if extra:
+            lines.append("<i>" + "; ".join(extra) + "</i>")
+        if o.warnings:
+            lines.append(f"⚠️ {capitalize_first(o.warnings[0])}")
+        if not lines:
+            lines.append(f"{self._emo('jacket')} Одевайся по привычке")
+        return lines
 
-        if focus.is_tomorrow:
-            intros = [
-                "На завтра советую надеть {items}.",
-                "Завтра лучше надеть {items}.",
-                "Завтра пригодится: надень {items}.",
-            ]
+    @staticmethod
+    def _short_wear(o, level: Thermal) -> list[str]:
+        """Только главное: верхняя одежда, аксессуары и «особая» обувь. Базовые вещи под курткой (кофта, штаны)
+        перечислять незачем; в тёплую погоду, когда куртки нет, — сама одежда (футболка, шорты)."""
+        items = list(o.texts((OUTER,), optional=False))
+        if items:
+            items += [it.text for key, it in o.slots[CORE].items() if key == "base" and not it.optional]  # термобельё
         else:
-            intros = [
-                "Лучше надеть {items}.",
-                "Я бы советовал надеть {items}.",
-                "Стоит надеть {items}.",
-                "Рекомендую надеть {items}.",
-                "Надень {items} — так будет комфортно.",
-            ]
-        if main_items:
-            sentences.append(self._pick(uid, "clothes", intros).format(items=f"<b>{join_ru(main_items)}</b>"))
+            items += o.texts((CORE,), optional=False)
+        if level >= Thermal.WARM:
+            items += o.texts((LEGS,), optional=False)
+        items += [t for t in o.texts((FEET,), optional=False) if any(w in t for w in ("непромокаем", "зимн", "утепл"))]
+        items += o.texts((HEAD, HANDS, NECK), optional=False)
+        return items
 
-        if accessories_required:
-            template = self._pick(
-                uid, "acc",
-                ["Не забудь про {x}.", "Добавь к этому {x}.", "И возьми с собой {x}."],
-            )
-            sentences.append(template.format(x=f"<b>{join_ru(accessories_required)}</b>"))
-
-        if extras_required:
-            sentences.append(
-                self._pick(uid, "extras", ["С собой лучше взять {x}.", "Захвати с собой {x}."]).format(
-                    x=f"<b>{join_ru(extras_required)}</b>"
-                )
-            )
-
-        if optional_items:
-            sentences.append(f"<i>По желанию можно добавить: {join_ru(optional_items[:2])}.</i>")
-        if extras_optional:
-            sentences.append(f"<i>На всякий случай можно взять {join_ru(extras_optional)}.</i>")
-
-        for warning in advice.outfit.warnings[:2]:
-            sentences.append(f"<i>⚠️ {capitalize_first(warning)}.</i>")
-
-        text = " ".join(s for s in sentences if s)
-        return text or "Особых рекомендаций по одежде нет — одевайся по привычке."
+    @staticmethod
+    def _event_block(event: NextEvent) -> str:
+        """Ближайшая задача: название и время начала (сразу после расписания уроков)."""
+        return f"⏰ Ближайшая задача: <b>{esc(event.title)}</b> — {event.start:%H:%M}"
 
     # ----------------------------- уроки -----------------------------
 
@@ -295,7 +274,7 @@ class SummaryGenerator:
         weekday_index = focus.focus_date.weekday()
         weekday = weekday_name(focus.focus_date)
 
-        if weekday_index == 6:
+        if weekday_index >= 5:
             text = self._pick(uid, "weekend", [
                 f"{self._emo('party')} {when} выходной — уроков нет.",
                 f"{self._emo('party')} {when} {weekday}, уроков нет.",
@@ -303,14 +282,6 @@ class SummaryGenerator:
             return text, "weekend", 0
 
         items = list(schedule.get(weekday_index, ()))
-
-        if weekday_index == 5 and not items:
-            text = self._pick(uid, "weekend", [
-                f"{self._emo('party')} {when} выходной — уроков нет.",
-                f"{self._emo('party')} {when} {weekday}, уроков нет.",
-            ])
-            return text, "weekend", 0
-
         if not items:
             return (
                 f"{self._emo('books')} Расписание на {WEEKDAYS_ACC[weekday_index]} пока не заполнено — "

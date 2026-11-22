@@ -150,7 +150,7 @@ class BroadcastTests(BroadcastCase):
         self.assertEqual(len(recipients), len(set(recipients)))          # одному — не больше раза
         self.assertNotIn(9, recipients)                                  # заведомо заблокированному не пытаемся
         self.assertEqual(set(recipients), {1, 2, 3, 4, 5, 6, 7, 8, 10})
-        self.assertTrue(all(c[1] == "Привет, <b>всем</b>" and c[2].get("parse_mode", "x") is None for c in bot.calls))
+        self.assertTrue(all(c[1] == "Привет, <b>всем</b>" and "parse_mode" not in c[2] for c in bot.calls))   # HTML — режим бота по умолчанию
         self.assertEqual((final.total_count, final.success_count, final.failed_count, final.blocked_count), (10, 6, 1, 3))
         self.assertEqual(final.status, "done")
         self.assertTrue((await self.users.get(3)).bot_blocked)

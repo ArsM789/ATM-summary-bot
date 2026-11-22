@@ -4,13 +4,15 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardMarkup
 
 from bot.keyboards.common import button, markup
+from bot.keyboards.nav import nav_row
 from services.time_service import WEEKDAYS_SHORT
 
 
 def overview_keyboard() -> InlineKeyboardMarkup:
     return markup(
-        [button(WEEKDAYS_SHORT[d], f"ls:day:{d}") for d in range(6)],
+        [button(WEEKDAYS_SHORT[d], f"ls:day:{d}") for d in range(5)],
         [button("📝 Заполнить по дням", "ls:fill"), button("📋 Вставить неделю", "ls:week")],
+        nav_row(),
     )
 
 
@@ -19,7 +21,7 @@ def day_keyboard(weekday: int, filled: bool) -> InlineKeyboardMarkup:
     if filled:
         rows.append([button("➖ Убрать урок", f"ls:del:{weekday}"),
                      button("🗑 Очистить день", f"ls:clr:{weekday}", style="danger")])
-    rows.append([button("‹ Назад", "ls:home")])
+    rows.append(nav_row("ls:home"))
     return markup(*rows)
 
 
