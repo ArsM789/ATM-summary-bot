@@ -230,9 +230,9 @@ async def _migrate_to_7(conn: aiosqlite.Connection) -> None:
         "ON broadcasts(content_hash, status)"
     )
 
-async def _migrate_to_8(conn):
-    await _add_column(conn, "broadcasts", "photo_file_id TEXT")
-    await _add_column(conn, "broadcasts", "photo_unique_id TEXT")
+async def _migrate_to_8(conn) -> None:
+    await _add_column(conn, "broadcasts", "photo_file_id", "TEXT")
+    await _add_column(conn, "broadcasts", "photo_unique_id", "TEXT")
 
 
 _MIGRATIONS = {2: _migrate_to_2, 3: _migrate_to_3, 4: _migrate_to_4, 5: _migrate_to_5, 6: _migrate_to_6, 7: _migrate_to_7, 8: _migrate_to_8}
