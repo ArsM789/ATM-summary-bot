@@ -16,7 +16,7 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-LATEST_VERSION = 8
+LATEST_VERSION = 7
 EVENING_TIME = "18:00"  # вечерняя сводка (на завтра) по умолчанию
 
 
@@ -220,7 +220,7 @@ async def _migrate_to_6(conn: aiosqlite.Connection) -> None:
         """
     )
 
-async def _migrate_to_8(conn: aiosqlite.Connection) -> None:
+async def _migrate_to_7(conn: aiosqlite.Connection) -> None:
     """Добавляем недостающие поля рассылок."""
     await _add_column(conn, "broadcasts", "kind", "TEXT NOT NULL DEFAULT 'custom'")
     await _add_column(conn, "broadcasts", "content_hash", "TEXT")
@@ -231,7 +231,7 @@ async def _migrate_to_8(conn: aiosqlite.Connection) -> None:
     )
 
 
-_MIGRATIONS = {2: _migrate_to_2, 3: _migrate_to_3, 4: _migrate_to_4, 5: _migrate_to_5, 6: _migrate_to_6, 8: _migrate_to_8}
+_MIGRATIONS = {2: _migrate_to_2, 3: _migrate_to_3, 4: _migrate_to_4, 5: _migrate_to_5, 6: _migrate_to_6, 7: _migrate_to_7}
 
 
 def _backup_sync(path: Path, version: int) -> Path:
