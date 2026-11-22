@@ -16,7 +16,7 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-LATEST_VERSION = 7
+LATEST_VERSION = 8
 EVENING_TIME = "18:00"  # вечерняя сводка (на завтра) по умолчанию
 
 
